@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SPQR - Stacked Polychromatic QR</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>SPQR Generator</h1>
+        <p class="subtitle">Stacked Polychromatic QR Code Generator</p>
+        
+        <!-- Scanner/Reader Section - Now at top -->
+        <div class="scanner-section">
+            <h2>📱 Read & Convert QR Codes</h2>
+            <p class="note">Upload or scan any QR code to read it and auto-generate all variants</p>
+            <div id="scanner-container">
+                <video id="video" width="300" height="300" style="display: none;"></video>
+                <canvas id="canvas" width="300" height="300" style="display: none;"></canvas>
+                <div id="upload-area">
+                    <input type="file" id="fileInput" accept="image/*" style="display: none;">
+                <button id="uploadBtn">📄 Upload QR Image</button>
+                <button id="cameraBtn">📷 Use Camera</button>
+                <button onclick="testDecoder()" style="background: #6c757d; margin-left: 10px;">🔧 Test Decoder</button>
+                </div>
+            </div>
+            <div id="scanResult"></div>
+        </div>
+        
+        <!-- Generator Section -->
+        <form id="generatorForm">
+            <div class="form-group">
+                <label for="text">✏️ Text to encode:</label>
+                <textarea id="text" placeholder="Enter your text here, or scan a QR code above to auto-fill..." required></textarea>
+            </div>
+            
+            <button type="submit">🎨 Generate All QR Variants</button>
+        </form>
+        
+        <div id="result" style="display: none;">
+            <!-- Results will be dynamically generated -->
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+    <script src="vendor/qrcodegen.min.js"></script>
+    <script src="app.js"></script>
+    <script>
+        // Add test runner (uses current web decoder path)
+        window.testDecoder = async function() {
+            console.log('=== SPQR Decoder Tests ===');
+            
+            // 1) Baseline: Generate a standard QR and ensure jsQR decodes
+            console.log('\n1. Baseline jsQR on standard QR...');
+            const qr = qrcode(1, 'M');
+            qr.addData('TEST');
+            qr.make();
+            const modules = qr.getModuleCount();
+            const margin = 4;
+            const modulePx = 12;
+            const size = (modules + 2*margin) * modulePx;
+            const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            ctx.fillStyle = '#fff'; ctx.fillRect(0,0,size,size);
+            ctx.fillStyle = '#000';
+            for (let y = 0; y < modules; y++) {
+                for (let x = 0; x < modules; x++) {
+                    if (qr.isDark(y,x)) ctx.fillRect((x+margin)*modulePx,(y+margin)*modulePx,modulePx,modulePx);
+                }
+            }
+            const imageData = ctx.getImageData(0,0,size,size);
+            const baseline = jsQR(imageData.data, imageData.width, imageData.height);
+            console.log('jsQR baseline:', baseline?.data || 'NO_CODE');
+            
+            // 2) SPQR: Generate client-side and run detectSPQR
+            console.log('\n2. SPQR generate + detect (BWRG)...');
+            const spqr = await generateSpqrClient('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz', { layers: 3, colours: ['bwrg'] });
+            const img = new Image();
+            await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = spqr.dataUrl; });
+            const c2 = document.createElement('canvas');
+            c2.width = img.width; c2.height = img.height;
+            const g2 = c2.getContext('2d', { willReadFrequently: true });
+            g2.imageSmoothingEnabled = false;
+            g2.drawImage(img, 0, 0);
+            const id2 = g2.getImageData(0, 0, c2.width, c2.height);
+            const result = detectSPQR(id2);
+            console.log('SPQR detect result:', result);
+            
+            console.log('\nTests complete.');
+        };
+        
+        console.log('Test runner loaded. Call testDecoder() to run tests.');
+    </script>
+<script>setTimeout(() => testDecoder(), 1000);</script></body>
+</html>

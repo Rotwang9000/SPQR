@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>SPQR Browser Decoder Test</title>
+    <script src="web/jsQR.js"></script>
+    <script src="web/qrcodegen.js"></script>
+    <script src="web/app.js"></script>
+</head>
+<body>
+    <h1>SPQR Browser Decoder Automated Test</h1>
+    <div id="results"></div>
+    
+    <script>
+        async function runTests() {
+            const results = document.getElementById('results');
+            results.innerHTML = '<p>Running tests...</p>';
+            
+            const tests = [
+                {
+                    name: '2-layer BWRG - Simple text',
+                    file: 'test_3layer.png',
+                    expectedBase: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ01234',
+                    expectedRed: '56789abcdefghijklmnopqrstuvwxyz',
+                    expectedCombined: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz'
+                }
+            ];
+            
+            let passed = 0, failed = 0;
+            let output = '<h2>Test Results</h2>';
+            
+            for (const test of tests) {
+                output += `<h3>${test.name}</h3>`;
+                try {
+                    const img = new Image();
+                    await new Promise((resolve, reject) => {
+                        img.onload = resolve;
+                        img.onerror = reject;
+                        img.src = test.file;
+                    });
+                    
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                    ctx.imageSmoothingEnabled = false;
+                    ctx.drawImage(img, 0, 0);
+                    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    
+                    const result = detectSPQR(imageData);
+                    
+                    if (!result || (!result.base && !result.red)) {
+                        throw new Error('No SPQR data decoded');
+                    }
+                    
+                    const { base, red, combined } = result;
+                    
+                    let errors = [];
+                    if (base !== test.expectedBase) {
+                        errors.push(`Base mismatch: expected "${test.expectedBase}", got "${base}"`);
+                    }
+                    if (red !== test.expectedRed) {
+                        errors.push(`Red mismatch: expected "${test.expectedRed}", got "${red}"`);
+                    }
+                    if (combined !== test.expectedCombined) {
+                        errors.push(`Combined mismatch: expected "${test.expectedCombined}", got "${combined}"`);
+                    }
+                    
+                    if (errors.length > 0) {
+                        throw new Error(errors.join('; '));
+                    }
+                    
+                    output += '<p style="color: green;">✓ PASSED</p>';
+                    passed++;
+                } catch (err) {
+                    output += `<p style="color: red;">✗ FAILED: ${err.message}</p>`;
+                    failed++;
+                }
+            }
+            
+            output += `<h2>Summary: ${passed} passed, ${failed} failed</h2>`;
+            results.innerHTML = output;
+            
+            // Exit code for automation
+            window.testsPassed = passed;
+            window.testsFailed = failed;
+        }
+        
+        window.addEventListener('load', runTests);
+    </script>
+</body>
+</html>

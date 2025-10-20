@@ -1,0 +1,4102 @@
+// SPQR Web App
+let currentStream = null;
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Check if required libraries are available
+    if (typeof jsQR === 'undefined') {
+        console.error('jsQR library failed to load!');
+        alert('QR scanning library failed to load. Please refresh the page.');
+    } else {
+        console.log('jsQR library loaded successfully');
+    }
+    
+	if (typeof qrcode === 'undefined') {
+		console.error('QR generation library failed to load!');
+		alert('QR generation library failed to load. Please refresh the page.');
+	} else {
+		console.log('QR generation library loaded successfully');
+	}
+    
+    setupEventListeners();
+});
+
+function setupEventListeners() {
+    const uploadBtn = document.getElementById('uploadBtn');
+    const cameraBtn = document.getElementById('cameraBtn');
+    const fileInput = document.getElementById('fileInput');
+    const textArea = document.getElementById('text');
+
+    uploadBtn.addEventListener('click', () => fileInput.click());
+    cameraBtn.addEventListener('click', toggleCamera);
+    fileInput.addEventListener('change', handleFileUpload);
+    if (textArea) {
+        textArea.addEventListener('input', onTextChanged);
+    }
+}
+
+// Custom colors storage
+window.bwrgColors = null;
+window.cmyrgbColors = null;
+
+let generateDebounce = null;
+function onTextChanged(e) {
+    const value = e.target.value;
+    if (generateDebounce) clearTimeout(generateDebounce);
+    generateDebounce = setTimeout(() => {
+        if (value && value.trim()) {
+            autoGenerateVariants(value.trim());
+        }
+    }, 400);
+}
+
+async function generateQR(text, options) {
+    console.log('Generating QR with:', { text, options });
+	
+	if (options.layers === 1) {
+		return await generateStandardQR(text);
+	}
+	return await generateSpqrClient(text, options);
+}
+
+async function generateStandardQR(text) {
+    try {
+		// Use qrcode-generator (window.qrcode) with low EC for max capacity (~2953 bytes)
+		const qr = qrcode(0, 'L');
+		qr.addData(text);
+		qr.make();
+		const svg = qr.createSvgTag(4, 2); // module size, margin
+		// Render to canvas to provide PNG data URL
+		const tmp = document.createElement('div');
+		tmp.innerHTML = svg;
+		const svgEl = tmp.firstChild;
+		const width = parseInt(svgEl.getAttribute('width') || '200');
+		const height = parseInt(svgEl.getAttribute('height') || '200');
+		const canvas = document.createElement('canvas');
+		canvas.width = width;
+		canvas.height = height;
+		const ctx = canvas.getContext('2d');
+		const img = new Image();
+		const data = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+		await new Promise((resolve, reject) => {
+			img.onload = resolve;
+			img.onerror = reject;
+			img.src = data;
+		});
+		ctx.drawImage(img, 0, 0);
+		const dataUrl = canvas.toDataURL('image/png');
+		return { svg, dataUrl };
+    } catch (error) {
+        console.error('Standard QR generation failed:', error);
+        throw new Error('Failed to generate standard QR code');
+    }
+}
+
+async function generateSpqrClient(text, options) {
+	// Pure client-side SPQR SVG composition using qrcode-generator
+	const layers = Math.max(2, Math.min(3, options.layers || 3));
+	const colours = normaliseColours(options.colours);
+	const isEightColour = colours.length >= 8;
+
+	// Error correction strategy:
+	// 'standard' - All layers EC 'L' (max capacity, ~2953 bytes/layer)
+	// 'hybrid'   - Base EC 'M', others EC 'L' (better reliability for critical data)
+	// 'parity'   - 2 data layers EC 'L', 3rd layer for parity (3-layer only, best reliability)
+	const ecMode = options.errorCorrection || 'standard';
+
+	// Split payload based on EC mode
+	let baseText, redText, greenText;
+	let baseEC = 'L', redEC = 'L', greenEC = 'L';
+	
+	if (ecMode === 'parity' && isEightColour) {
+		// Parity mode: Use only 2 layers for data, 3rd for parity
+		const parts = splitPayload(text, 2);
+		baseText = parts[0] || '';
+		redText = parts[1] || '';
+		// Generate parity data (simple CRC32 + XOR for now)
+		greenText = generateParityData(baseText, redText);
+		console.log(`SPQR Parity mode: ${baseText.length} + ${redText.length} bytes data, ${greenText.length} bytes parity`);
+	} else if (ecMode === 'hybrid') {
+		// Hybrid mode: First layer gets EC 'M' for critical data
+	const splits = isEightColour ? 3 : 2;
+	const parts = splitPayload(text, splits);
+		baseText = parts[0] || '';
+		redText = parts[1] || '';
+		greenText = isEightColour ? (parts[2] || '') : '';
+		baseEC = 'M';  // Base layer gets higher EC
+		console.log(`SPQR Hybrid mode: Base EC 'M' (${baseText.length}b), others EC 'L'`);
+	} else {
+		// Standard mode: Even split, all EC 'L'
+		const splits = isEightColour ? 3 : 2;
+		const parts = splitPayload(text, splits);
+		baseText = parts[0] || '';
+		redText = parts[1] || '';
+		greenText = isEightColour ? (parts[2] || '') : '';
+		console.log(`SPQR Standard mode: All layers EC 'L', ${splits} layers`);
+	}
+
+	// First pass to find max version needed
+	const encodes = [
+		makeQrAuto(baseText, baseEC),
+		makeQrAuto(redText, redEC),
+		greenText ? makeQrAuto(greenText, greenEC) : null
+	].filter(Boolean);
+	const moduleCounts = encodes.map(qr => qr.getModuleCount());
+	const maxModules = moduleCounts.length ? Math.max.apply(null, moduleCounts) : 21;
+	const targetVersion = Math.max(1, Math.round((maxModules - 17) / 4));
+
+	// Check capacity limits - very large QR codes are harder to decode reliably
+	const maxRecommendedVersion = isEightColour ? 25 : 30; // CMYRGB is more sensitive
+	if (targetVersion > maxRecommendedVersion) {
+		const maxModules = 21 + (maxRecommendedVersion - 1) * 4;
+		throw new Error(`Data too large for reliable decoding. QR Version ${targetVersion} (${maxModules} modules) exceeds recommended limit. Please reduce text size.`);
+	}
+
+	// Regenerate with fixed version
+	const baseQr = makeQrFixed(targetVersion, baseEC, baseText);
+	const redQr = makeQrFixed(targetVersion, redEC, redText);
+	const greenQr = isEightColour && greenText ? makeQrFixed(targetVersion, greenEC, greenText) : null;
+
+	const modules = baseQr.getModuleCount();
+	const margin = 4;
+
+	const bitsPerModule = isEightColour ? 3 : 2;
+	const basePx = 4;
+	const adjustedPx = Math.max(basePx, Math.floor(basePx * Math.sqrt(bitsPerModule)));
+	const cell = adjustedPx;
+	const totalModules = modules + 2 * margin;
+	const width = totalModules * cell;
+	const height = width;
+
+	// Helper to query a module
+	const dark = (qr, x, y) => (qr ? qr.isDark(y, x) : false);
+
+	let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+	// White background
+	svg += `<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`;
+
+	// Draw modules
+	for (let y = 0; y < modules; y++) {
+		for (let x = 0; x < modules; x++) {
+			// Skip finder rings; we'll draw them later to ensure black outline
+			if (isInFinderRing(x, y, modules)) continue;
+			
+			const b = dark(baseQr, x, y) ? 1 : 0;
+			const r = dark(redQr, x, y) ? 1 : 0;
+			const g = isEightColour ? (dark(greenQr, x, y) ? 1 : 0) : (b & r);
+			
+			let colour = '#ffffff';
+			if (isEightColour) {
+				const code = (b << 2) | (g << 1) | r; // 0..7
+				const idxMap = [0,1,2,3,4,5,6,7];
+				colour = colours[idxMap[code]] || '#000000';
+			} else {
+				// 4-colour BWRG mapping: white, red, green, black/green for overlaps
+				if (b && !r) colour = colours[3];
+				else if (!b && r && !g) colour = colours[1];
+				else if (g) colour = colours[2];
+				else colour = colours[0];
+			}
+			if (colour === '#ffffff') continue;
+			const px = (x + margin) * cell;
+			const py = (y + margin) * cell;
+			svg += `<rect x="${px}" y="${py}" width="${cell}" height="${cell}" fill="${colour}"/>`;
+		}
+	}
+
+	// Draw black finder rings to ensure readability
+	drawFinder(svgAdd => { svg += svgAdd; }, modules, margin, cell);
+
+	// Draw colour keys inside inner 3x3
+	drawFinderKeys(svgAdd => { svg += svgAdd; }, modules, margin, cell, colours, isEightColour);
+
+	svg += `</svg>`;
+
+	const dataUrl = await svgToPngDataUrl(svg, width, height);
+	return { svg, dataUrl };
+}
+
+function normaliseColours(coloursArg) {
+	// Accept ['bwrg'] or ['cmyrgb'] or hex list; return palette array
+	const token = Array.isArray(coloursArg) && coloursArg.length === 1 ? String(coloursArg[0]).toLowerCase() : '';
+	
+	// Use custom BWRG colors if available
+	if (token === 'bwrg' && window.bwrgColors && window.bwrgColors.length === 4) {
+		console.log('Using custom BWRG colors');
+		return window.bwrgColors;
+	}
+	
+	// Use custom CMYRGB colors if available
+	if (token === 'cmyrgb' && window.cmyrgbColors && window.cmyrgbColors.length === 8) {
+		console.log('Using custom CMYRGB colors');
+		return window.cmyrgbColors;
+	}
+	
+	if (token === 'bwrg') return ['#ffffff','#ff0000','#00ff00','#000000'];
+	if (token === 'cmyrgb') return ['#ffffff','#ff0000','#00ff00','#ffff00','#000000','#ff00ff','#00ffff','#0000ff'];
+	// Fallback default
+	return ['#ffffff','#ff0000','#00ff00','#000000'];
+}
+
+function splitPayload(payload, splits) {
+	splits = Math.max(1, Math.min(3, splits|0));
+	const size = Math.ceil(payload.length / splits);
+	const parts = [];
+	for (let i = 0; i < splits; i++) parts.push(payload.slice(i*size, (i+1)*size));
+	return parts;
+}
+
+// Generate parity/checksum data for error detection and recovery
+function generateParityData(data1, data2) {
+	const crc32 = (str) => {
+		let crc = 0xFFFFFFFF;
+		for (let i = 0; i < str.length; i++) {
+			crc ^= str.charCodeAt(i);
+			for (let j = 0; j < 8; j++) {
+				crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
+			}
+		}
+		return (crc ^ 0xFFFFFFFF) >>> 0;
+	};
+	
+	const crc1 = crc32(data1).toString(16).padStart(8, '0');
+	const crc2 = crc32(data2).toString(16).padStart(8, '0');
+	const len1 = data1.length.toString(16).padStart(4, '0');
+	const len2 = data2.length.toString(16).padStart(4, '0');
+	
+	// XOR parity bytes for recovery
+	const maxLen = Math.max(data1.length, data2.length);
+	let xorParity = '';
+	for (let i = 0; i < Math.min(maxLen, 200); i++) {
+		const b1 = i < data1.length ? data1.charCodeAt(i) : 0;
+		const b2 = i < data2.length ? data2.charCodeAt(i) : 0;
+		xorParity += String.fromCharCode(b1 ^ b2);
+	}
+	
+	return `SPQRv1|${len1}|${len2}|${crc1}|${crc2}|${xorParity}`;
+}
+
+// Verify and recover data using parity layer
+function verifyWithParity(base, red, parityData) {
+	if (!parityData || !parityData.startsWith('SPQRv1|')) {
+		return { valid: false, recovered: null };
+	}
+	
+	const parts = parityData.split('|');
+	if (parts.length < 6) return { valid: false, recovered: null };
+	
+	const len1 = parseInt(parts[1], 16);
+	const len2 = parseInt(parts[2], 16);
+	const expectedCrc1 = parts[3];
+	const expectedCrc2 = parts[4];
+	const xorParity = parts.slice(5).join('|');
+	
+	const crc32 = (str) => {
+		let crc = 0xFFFFFFFF;
+		for (let i = 0; i < str.length; i++) {
+			crc ^= str.charCodeAt(i);
+			for (let j = 0; j < 8; j++) {
+				crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
+			}
+		}
+		return (crc ^ 0xFFFFFFFF) >>> 0;
+	};
+	
+	const actualCrc1 = base ? crc32(base).toString(16).padStart(8, '0') : null;
+	const actualCrc2 = red ? crc32(red).toString(16).padStart(8, '0') : null;
+	
+	const baseValid = base && actualCrc1 === expectedCrc1;
+	const redValid = red && actualCrc2 === expectedCrc2;
+	
+	console.log(`🔍 Parity check: Base ${baseValid ? '✅' : '❌'}, Red ${redValid ? '✅' : '❌'}`);
+	
+	let recovered = null;
+	if (baseValid && !redValid && xorParity) {
+		recovered = { layer: 'red', data: '' };
+		for (let i = 0; i < len2 && i < xorParity.length; i++) {
+			const b1 = i < base.length ? base.charCodeAt(i) : 0;
+			const xor = xorParity.charCodeAt(i);
+			recovered.data += String.fromCharCode(b1 ^ xor);
+		}
+		console.log(`✅ Recovered red layer from parity (${recovered.data.length} bytes)`);
+	} else if (!baseValid && redValid && xorParity) {
+		recovered = { layer: 'base', data: '' };
+		for (let i = 0; i < len1 && i < xorParity.length; i++) {
+			const b2 = i < red.length ? red.charCodeAt(i) : 0;
+			const xor = xorParity.charCodeAt(i);
+			recovered.data += String.fromCharCode(b2 ^ xor);
+		}
+		console.log(`✅ Recovered base layer from parity (${recovered.data.length} bytes)`);
+	}
+	
+	return { valid: baseValid && redValid, baseValid, redValid, recovered };
+}
+
+function makeQrAuto(text, ecc) {
+	const qr = qrcode(0, ecc);
+	qr.addData(text);
+	qr.make();
+	return qr;
+}
+
+function makeQrFixed(version, ecc, text) {
+	try {
+		const qr = qrcode(version, ecc);
+		qr.addData(text);
+		qr.make();
+		return qr;
+	} catch (e) {
+		return null;
+	}
+}
+
+function isInFinderRing(x, y, modules) {
+	// Finder 7x7 squares at (0,0), (modules-7,0), (0,modules-7)
+	const inTL = x < 7 && y < 7;
+	const inTR = x >= modules-7 && y < 7;
+	const inBL = x < 7 && y >= modules-7;
+	const inFinder = inTL || inTR || inBL;
+	if (!inFinder) return false;
+	// Ring excludes the inner 3x3 (x:2..4,y:2..4)
+	const inInner = (x >= 2 && x <= 4) && (y >= 2 && y <= 4);
+	return true && !inInner ? true : false;
+}
+
+function drawFinder(append, modules, margin, cell) {
+	const addRect = (gx, gy, w, h) => {
+		append(`<rect x="${(gx+margin)*cell}" y="${(gy+margin)*cell}" width="${w*cell}" height="${h*cell}" fill="#000000"/>`);
+	};
+	const drawAt = (gx, gy) => {
+		// Outer ring 7x7: black border with white gap then black 3x3 center
+		addRect(gx+0, gy+0, 7, 1);
+		addRect(gx+0, gy+6, 7, 1);
+		addRect(gx+0, gy+1, 1, 5);
+		addRect(gx+6, gy+1, 1, 5);
+		addRect(gx+2, gy+2, 3, 3);
+	};
+	// TL, TR, BL
+	drawAt(0,0);
+	drawAt(modules-7,0);
+	drawAt(0,modules-7);
+}
+
+function drawFinderKeys(append, modules, margin, cell, colours, isEightColour) {
+	const fillInner = (gx, gy, colourOrPair) => {
+		const x0 = (gx+2+margin) * cell;
+		const y0 = (gy+2+margin) * cell;
+		if (Array.isArray(colourOrPair)) {
+			// 2x2 grid for 4 colors (or 2-color checker if only 2 provided)
+			if (colourOrPair.length === 4) {
+				// 4-color 2x2 grid
+				const quadSize = cell * 1.5;
+				append(`<rect x="${x0}" y="${y0}" width="${quadSize}" height="${quadSize}" fill="${colourOrPair[0]}"/>`);
+				append(`<rect x="${x0+quadSize}" y="${y0}" width="${quadSize}" height="${quadSize}" fill="${colourOrPair[1]}"/>`);
+				append(`<rect x="${x0}" y="${y0+quadSize}" width="${quadSize}" height="${quadSize}" fill="${colourOrPair[2]}"/>`);
+				append(`<rect x="${x0+quadSize}" y="${y0+quadSize}" width="${quadSize}" height="${quadSize}" fill="${colourOrPair[3]}"/>`);
+			} else {
+				// 2-color checker
+			const c1 = colourOrPair[0], c2 = colourOrPair[1];
+			append(`<rect x="${x0}" y="${y0}" width="${cell*1.5}" height="${cell*1.5}" fill="${c1}"/>`);
+			append(`<rect x="${x0+cell*1.5}" y="${y0}" width="${cell*1.5}" height="${cell*1.5}" fill="${c2}"/>`);
+			append(`<rect x="${x0}" y="${y0+cell*1.5}" width="${cell*1.5}" height="${cell*1.5}" fill="${c2}"/>`);
+			append(`<rect x="${x0+cell*1.5}" y="${y0+cell*1.5}" width="${cell*1.5}" height="${cell*1.5}" fill="${c1}"/>`);
+			}
+		} else {
+			append(`<rect x="${x0}" y="${y0}" width="${cell*3}" height="${cell*3}" fill="${colourOrPair}"/>`);
+		}
+	};
+	if (isEightColour) {
+		// For CMYRGB: Show ALL 8 colors across 3 finder patterns
+		// TL: white, red, green, yellow (4 colors in 2x2 grid)
+		// TR: black, magenta, cyan, blue (4 colors in 2x2 grid)
+		// BL: Can repeat key colors for redundancy or use a mix
+		// Colours array: ['#ffffff','#ff0000','#00ff00','#ffff00','#000000','#ff00ff','#00ffff','#0000ff']
+		// Indices:        [   0,        1,        2,        3,        4,        5,        6,        7   ]
+		fillInner(0, 0, [colours[0], colours[1], colours[2], colours[3]]);  // TL: white, red, green, yellow
+		fillInner(modules-7, 0, [colours[4], colours[5], colours[6], colours[7]]);  // TR: black, magenta, cyan, blue
+		fillInner(0, modules-7, [colours[1], colours[6]]);  // BL: red/cyan checker for redundancy
+	} else {
+		// TL red, TR green, BL black
+		fillInner(0,0,colours[1]);
+		fillInner(modules-7,0,colours[2]);
+		fillInner(0,modules-7,colours[3]);
+	}
+}
+
+async function svgToPngDataUrl(svg, width, height) {
+	const img = new Image();
+	const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+	await new Promise((resolve, reject) => {
+		img.onload = resolve;
+		img.onerror = reject;
+		img.src = url;
+	});
+	const canvas = document.createElement('canvas');
+	canvas.width = width;
+	canvas.height = height;
+	const ctx = canvas.getContext('2d');
+	ctx.imageSmoothingEnabled = false;
+	ctx.drawImage(img, 0, 0, width, height);
+	return canvas.toDataURL('image/png');
+}
+
+// Estimate the module size (in pixels) by scanning for the periodicity of black/white transitions
+function estimateModulePx(width, height, mask) {
+	// Prefer the smaller dimension for robustness
+	const scanW = Math.min(width, 1024);
+	const scanH = Math.min(height, 1024);
+	// Sample a horizontal line at mid-height
+	const y = Math.floor(scanH / 2);
+	let lastDark = null;
+	let runLengths = [];
+	let run = 0;
+	const getDark = (x) => {
+		const idx = (y * width + x) * 4;
+		return mask ? (mask[idx] < 128) : false;
+	};
+	for (let x = 0; x < scanW; x++) {
+		const dark = getDark(x);
+		if (lastDark === null) {
+			lastDark = dark; run = 1; continue;
+		}
+		if (dark === lastDark) {
+			run++;
+		} else {
+			runLengths.push(run);
+			lastDark = dark;
+			run = 1;
+		}
+	}
+	if (run > 0) runLengths.push(run);
+	if (runLengths.length < 5) return null;
+	// Use median run length as module size estimate
+	runLengths.sort((a,b)=>a-b);
+	const mid = Math.floor(runLengths.length/2);
+	let modulePx = runLengths[mid];
+	modulePx = Math.max(3, Math.min(20, modulePx|0));
+	return modulePx || null;
+}
+
+function estimateGrid(mask, width, height) {
+	const modulePx = estimateModulePx(width, height, mask) || Math.max(3, Math.min(20, Math.round(width/29)));
+	let minX = width, minY = height, maxX = 0, maxY = 0;
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			const i = (y*width + x) * 4;
+			if (mask[i] < 128) {
+				if (x < minX) minX = x;
+				if (y < minY) minY = y;
+				if (x > maxX) maxX = x;
+				if (y > maxY) maxY = y;
+			}
+		}
+	}
+	if (minX === width || minY === height) {
+		return { modulePx, originX: 0, originY: 0, totalModules: Math.floor(width/modulePx) };
+	}
+	// Snap origin to module grid so quiet zone is exactly 4 modules
+	const originX = Math.max(0, Math.round(minX / modulePx - 4) * modulePx);
+	const originY = Math.max(0, Math.round(minY / modulePx - 4) * modulePx);
+	const usableModulesX = Math.floor((width - originX) / modulePx);
+	const usableModulesY = Math.floor((height - originY) / modulePx);
+	const totalModules = Math.min(usableModulesX, usableModulesY);
+	return { modulePx, originX, originY, totalModules };
+}
+
+// Locate QR structure directly from colored SPQR image
+function locateQRStructure(data, width, height) {
+    console.log(`locateQRStructure: ${width}x${height} image`);
+    // Consider any non-white pixel as part of QR structure
+    const isQRPixel = (x, y) => {
+        const i = (y * width + x) * 4;
+        const r = data[i], g = data[i+1], b = data[i+2];
+        return r < 240 || g < 240 || b < 240;
+    };
+    
+    const finderCandidates = [];
+    
+    // Scan horizontal lines for 1:1:3:1:1 patterns
+    for (let y = 0; y < height; y += Math.max(1, Math.floor(height/40))) {
+        const runs = [];
+        let lastWasQR = false;
+        let runLength = 0;
+        
+        for (let x = 0; x <= width; x++) {
+            const isQR = x < width ? isQRPixel(x, y) : false;
+            
+            if (x === 0) {
+                lastWasQR = isQR;
+                runLength = 1;
+                continue;
+            }
+            
+            if (isQR === lastWasQR && x < width) {
+                runLength++;
+            } else {
+                runs.push({ dark: lastWasQR, length: runLength, endX: x - 1 });
+                lastWasQR = isQR;
+                runLength = 1;
+            }
+        }
+        
+        // Look for 1:1:3:1:1 pattern in runs
+        for (let i = 2; i < runs.length - 2; i++) {
+            const [r1, r2, r3, r4, r5] = [runs[i-2], runs[i-1], runs[i], runs[i+1], runs[i+2]];
+            
+            if (r1.dark && !r2.dark && r3.dark && !r4.dark && r5.dark) {
+                const [l1, l2, l3, l4, l5] = [r1.length, r2.length, r3.length, r4.length, r5.length];
+                const total = l1 + l2 + l3 + l4 + l5;
+                
+                if (total >= 15) {
+                    const ratios = [l1, l2, l3, l4, l5].map(len => len / total);
+                    
+                    // Check for approximate 1:1:3:1:1 ratios
+                    if (Math.abs(ratios[0] - 0.14) < 0.08 && 
+                        Math.abs(ratios[1] - 0.14) < 0.08 && 
+                        Math.abs(ratios[2] - 0.43) < 0.15 && 
+                        Math.abs(ratios[3] - 0.14) < 0.08 && 
+                        Math.abs(ratios[4] - 0.14) < 0.08) {
+                        
+                        const centerX = r1.endX - l1 + 1 + l1 + l2 + Math.floor(l3/2);
+                        const modulePx = Math.max(3, Math.round(l3 / 3));
+                        
+                        finderCandidates.push({ x: centerX, y, modulePx, strength: total });
+                    }
+                }
+            }
+        }
+    }
+    
+    // Scan vertical lines for 1:1:3:1:1 patterns
+    for (let x = 0; x < width; x += Math.max(1, Math.floor(width/40))) {
+        const runs = [];
+        let lastWasQR = false;
+        let runLength = 0;
+        
+        for (let y = 0; y <= height; y++) {
+            const isQR = y < height ? isQRPixel(x, y) : false;
+            
+            if (y === 0) {
+                lastWasQR = isQR;
+                runLength = 1;
+                continue;
+            }
+            
+            if (isQR === lastWasQR && y < height) {
+                runLength++;
+            } else {
+                runs.push({ dark: lastWasQR, length: runLength, endY: y - 1 });
+                lastWasQR = isQR;
+                runLength = 1;
+            }
+        }
+        
+        // Look for 1:1:3:1:1 pattern in runs
+        for (let i = 2; i < runs.length - 2; i++) {
+            const [r1, r2, r3, r4, r5] = [runs[i-2], runs[i-1], runs[i], runs[i+1], runs[i+2]];
+            
+            if (r1.dark && !r2.dark && r3.dark && !r4.dark && r5.dark) {
+                const [l1, l2, l3, l4, l5] = [r1.length, r2.length, r3.length, r4.length, r5.length];
+                const total = l1 + l2 + l3 + l4 + l5;
+                
+                if (total >= 15) {
+                    const ratios = [l1, l2, l3, l4, l5].map(len => len / total);
+                    
+                    // Check for approximate 1:1:3:1:1 ratios
+                    if (Math.abs(ratios[0] - 0.14) < 0.08 && 
+                        Math.abs(ratios[1] - 0.14) < 0.08 && 
+                        Math.abs(ratios[2] - 0.43) < 0.15 && 
+                        Math.abs(ratios[3] - 0.14) < 0.08 && 
+                        Math.abs(ratios[4] - 0.14) < 0.08) {
+                        
+                        const centerY = r1.endY - l1 + 1 + l1 + l2 + Math.floor(l3/2);
+                        const modulePx = Math.max(3, Math.round(l3 / 3));
+                        
+                        finderCandidates.push({ x, y: centerY, modulePx, strength: total });
+                    }
+                }
+            }
+        }
+    }
+    
+    if (finderCandidates.length < 6) {
+        console.log(`Found only ${finderCandidates.length} finder candidates, need at least 6`);
+        return null;
+    }
+    
+    // Cluster candidates into 3 finder locations
+    const avgModulePx = finderCandidates.reduce((sum, c) => sum + c.modulePx, 0) / finderCandidates.length;
+    const clusters = [];
+    
+    for (const candidate of finderCandidates) {
+        let foundCluster = false;
+        for (const cluster of clusters) {
+            const dx = candidate.x - cluster.x;
+            const dy = candidate.y - cluster.y;
+            const distance = Math.sqrt(dx*dx + dy*dy);
+            
+            if (distance < avgModulePx * 5) { // Within 5 modules
+                cluster.x = (cluster.x * cluster.count + candidate.x) / (cluster.count + 1);
+                cluster.y = (cluster.y * cluster.count + candidate.y) / (cluster.count + 1);
+                cluster.strength += candidate.strength;
+                cluster.count++;
+                foundCluster = true;
+                break;
+            }
+        }
+        
+        if (!foundCluster) {
+            clusters.push({
+                x: candidate.x,
+                y: candidate.y,
+                strength: candidate.strength,
+                count: 1
+            });
+        }
+    }
+    
+    // Sort by strength and take top 3
+    clusters.sort((a, b) => b.strength - a.strength);
+    const finders = clusters.slice(0, 3);
+    
+    if (finders.length < 3) {
+        console.log(`Found only ${finders.length} finder clusters, need 3`);
+        return null;
+    }
+    
+    // Calculate QR version from finder spacing
+    const minX = Math.min(...finders.map(f => f.x));
+    const maxX = Math.max(...finders.map(f => f.x));
+    const minY = Math.min(...finders.map(f => f.y));
+    const maxY = Math.max(...finders.map(f => f.y));
+    const qrWidth = maxX - minX;
+    const qrHeight = maxY - minY;
+    const avgQrSize = (qrWidth + qrHeight) / 2;
+    const modulePx = Math.round(avgModulePx);
+    // Finder centres are at module coordinates (3,3), (modules-4,3), (3,modules-4)
+    // So spacing between centres ≈ (modules - 7) modules.
+    const modulesEstimate = Math.round(avgQrSize / modulePx) + 7;
+    const estimatedVersion = Math.max(1, Math.round((modulesEstimate - 17) / 4));
+    const qrModules = 17 + 4 * estimatedVersion;
+    // Quiet zone is 4 modules. Origin is top-left of entire QR including quiet zone.
+    const originX = Math.round(minX - 7 * modulePx);
+    const originY = Math.round(minY - 7 * modulePx);
+    
+    console.log(`QR analysis: finder spacing ${avgQrSize.toFixed(1)}px → ${qrModules} modules → version ${estimatedVersion} (${qrModules}×${qrModules})`);
+    
+    return {
+        finders,
+        modulePx,
+        qrModules,
+        originX: Math.max(0, originX),
+        originY: Math.max(0, originY)
+    };
+}
+
+// Simple run-length based finder locator fallback
+function locateGridByRunLengths(mask, width, height) {
+	const isDark = (x, y) => mask[(y*width + x)*4] < 128;
+	const candidates = [];
+	// Scan a few central rows for 1:1:3:1:1 patterns
+	for (let y = Math.floor(height*0.2); y < Math.floor(height*0.8); y += Math.max(1, Math.floor(height/60))) {
+		let runs = [];
+		let last = false; let count = 0;
+		for (let x = 0; x < width; x++) {
+			const d = isDark(x,y);
+			if (x===0) { last = d; count = 1; continue; }
+			if (d === last) { count++; } else { runs.push({ dark:last, len:count, xEnd:x-1 }); last = d; count = 1; }
+		}
+		runs.push({ dark:last, len:count, xEnd:width-1 });
+		for (let i = 2; i < runs.length-2; i++) {
+			const a=runs[i-2], b=runs[i-1], c=runs[i], d=runs[i+1], e=runs[i+2];
+			if (a.dark && !b.dark && c.dark && !d.dark && e.dark) {
+				const l1=a.len, l2=b.len, l3=c.len, l4=d.len, l5=e.len;
+				const total=l1+l2+l3+l4+l5; if (total<15) continue;
+				const ratio=[l1,l2,l3,l4,l5].map(v=>v/total);
+				// Roughly 1:1:3:1:1
+				if (Math.abs(ratio[0]-0.166)<0.1 && Math.abs(ratio[1]-0.166)<0.1 && Math.abs(ratio[2]-0.5)<0.15 && Math.abs(ratio[3]-0.166)<0.1 && Math.abs(ratio[4]-0.166)<0.1) {
+					const xCenter = runs[i-2].xEnd + l1 + l2 + Math.floor(l3/2);
+					candidates.push({ x:xCenter, y, modulePx: Math.max(3, Math.round(l3/3)) });
+				}
+			}
+		}
+	}
+	if (candidates.length < 3) return { modulePx: null, originX: 0, originY: 0, totalModules: 29 };
+	// Rough grid from candidates
+    const avgModule = Math.round(candidates.reduce((s,c)=>s+c.modulePx,0)/candidates.length);
+    const result = { modulePx: avgModule, originX: 0, originY: 0, totalModules: Math.round(Math.min(width,height)/avgModule) };
+    console.log(`locateQRStructure result:`, result);
+    return result;
+}
+
+function sampleFinderRefs(rgba, width, height, modulePx, modulesTotal, marginModules) {
+	// Sample approximate finder inner squares for red/green/black references
+	const sampleMean = (cx, cy, radius) => {
+		let r=0,g=0,b=0,c=0;
+		for (let y = Math.max(0, cy-radius); y < Math.min(height, cy+radius); y++) {
+			for (let x = Math.max(0, cx-radius); x < Math.min(width, cx+radius); x++) {
+				const i = (y*width + x) * 4;
+				r += rgba[i];
+				g += rgba[i+1];
+				b += rgba[i+2];
+				c++;
+			}
+		}
+		return c ? [Math.round(r/c), Math.round(g/c), Math.round(b/c)] : [0,0,0];
+	};
+	const innerOffset = (marginModules + 3) * modulePx + Math.floor(modulePx/2);
+	const tl = sampleMean(innerOffset, innerOffset, Math.max(2, Math.floor(modulePx)));
+	const tr = sampleMean(width - innerOffset, innerOffset, Math.max(2, Math.floor(modulePx)));
+	const bl = sampleMean(innerOffset, height - innerOffset, Math.max(2, Math.floor(modulePx)));
+	// Heuristic mapping: assume TL≈red, TR≈green, BL≈black in 4-colour mode
+	return { red: tl, green: tr, black: bl };
+}
+
+function rgbaToDataUrl(width, height, rgba) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    const imageData = new ImageData(rgba, width, height);
+    ctx.putImageData(imageData, 0, 0);
+    return canvas.toDataURL('image/png');
+}
+
+function displayResults(standard, bwrg, cmyrgb) {
+    console.log('Displaying results:', { standard, bwrg, cmyrgb });
+    const resultDiv = document.getElementById('result');
+    
+    if (!resultDiv) {
+        console.error('Result div not found!');
+        return;
+    }
+    
+    // Build the complete HTML structure
+    const html = `
+        <h2>Generated QR Codes</h2>
+        <p class="note">All variants contain the same data with different visual square sizes:</p>
+        
+        <div class="qr-variant">
+            <h3>Standard QR</h3>
+            <p class="capacity-note">Baseline module size</p>
+            <div id="standardDisplay">${standard.svg}</div>
+            <div class="download-links">
+                <a id="downloadStandardSvg" download="standard.svg">SVG</a>
+                <a id="downloadStandardPng" download="standard.png">PNG</a>
+            </div>
+        </div>
+        
+        <div class="qr-variant">
+            <h3>BWRG (4-color SPQR)</h3>
+            <p class="capacity-note">1.4× bigger modules for same data</p>
+            <div id="bwrgDisplay">${bwrg.svg}</div>
+            <div class="download-links">
+                <a id="downloadBwrgSvg" download="bwrg.svg">SVG</a>
+                <a id="downloadBwrgPng" download="bwrg.png">PNG</a>
+            </div>
+            <div class="color-customization-inline" id="bwrgColors" style="display: none; margin-top: 15px;">
+                <p class="color-note" style="margin: 10px 0;">Customize colors for branding or accessibility:</p>
+                <div class="color-grid-inline">
+                    <div class="color-input-group-inline">
+                        <label>⚪ White:</label>
+                        <input type="color" class="bwrg-color-picker" data-color="white" value="#ffffff">
+                        <input type="text" class="bwrg-color-hex" data-color="white" value="#ffffff" maxlength="7">
+                    </div>
+                    <div class="color-input-group-inline">
+                        <label>⚫ Black:</label>
+                        <input type="color" class="bwrg-color-picker" data-color="black" value="#000000">
+                        <input type="text" class="bwrg-color-hex" data-color="black" value="#000000" maxlength="7">
+                    </div>
+                    <div class="color-input-group-inline">
+                        <label>🔴 Red:</label>
+                        <input type="color" class="bwrg-color-picker" data-color="red" value="#ff0000">
+                        <input type="text" class="bwrg-color-hex" data-color="red" value="#ff0000" maxlength="7">
+                    </div>
+                    <div class="color-input-group-inline">
+                        <label>🟢 Green:</label>
+                        <input type="color" class="bwrg-color-picker" data-color="green" value="#00ff00">
+                        <input type="text" class="bwrg-color-hex" data-color="green" value="#00ff00" maxlength="7">
+                    </div>
+                </div>
+                <div class="color-presets">
+                    <button type="button" class="btn-secondary btn-sm" onclick="resetBWRGColors()">Reset</button>
+                </div>
+            </div>
+            <button type="button" class="btn-customize" onclick="toggleBWRGColors()">🎨 Customize Colors</button>
+        </div>
+        
+        <div class="qr-variant">
+            <h3>CMYRGB (8-color SPQR)</h3>
+            <p class="capacity-note" id="cmyrgbCapacityNote">1.5× bigger modules for same data</p>
+            <div id="cmyrgbDisplay">${cmyrgb.svg}</div>
+            <div class="download-links">
+                <a id="downloadCmyrgbSvg" download="cmyrgb.svg">SVG</a>
+                <a id="downloadCmyrgbPng" download="cmyrgb.png">PNG</a>
+            </div>
+            <div class="ec-mode-selector">
+                <p style="margin: 15px 0 10px 0; font-weight: 600; color: #667eea;">🛡️ Error Correction:</p>
+                <div class="radio-group-inline">
+                    <label class="radio-label-inline">
+                        <input type="radio" name="cmyrgbEC" value="standard" ${(window.currentECMode || 'parity') === 'standard' ? 'checked' : ''}>
+                        <span>Standard</span>
+                    </label>
+                    <label class="radio-label-inline">
+                        <input type="radio" name="cmyrgbEC" value="hybrid" ${(window.currentECMode || 'parity') === 'hybrid' ? 'checked' : ''}>
+                        <span>Hybrid</span>
+                    </label>
+                    <label class="radio-label-inline">
+                        <input type="radio" name="cmyrgbEC" value="parity" ${(window.currentECMode || 'parity') === 'parity' ? 'checked' : ''}>
+                        <span>Parity</span>
+                    </label>
+                </div>
+                <p class="ec-mode-description" style="margin-top: 8px; font-size: 0.9em; color: #666;"></p>
+            </div>
+            <div class="color-customization-inline" id="cmyrgbColorsSection" style="display: none; margin-top: 15px;">
+                <p class="color-note" style="margin: 10px 0;">Customize colors for branding or accessibility:</p>
+                <div class="color-grid-inline">
+                    <div class="color-input-group-inline">
+                        <label>⚪ White:</label>
+                        <input type="color" class="cmyrgb-color-picker" data-color="white" value="#ffffff">
+                        <input type="text" class="cmyrgb-color-hex" data-color="white" value="#ffffff" maxlength="7">
+                    </div>
+                    <div class="color-input-group-inline">
+                        <label>🔴 Red:</label>
+                        <input type="color" class="cmyrgb-color-picker" data-color="red" value="#ff0000">
+                        <input type="text" class="cmyrgb-color-hex" data-color="red" value="#ff0000" maxlength="7">
+                    </div>
+                    <div class="color-input-group-inline">
+                        <label>🟢 Green:</label>
+                        <input type="color" class="cmyrgb-color-picker" data-color="green" value="#00ff00">
+                        <input type="text" class="cmyrgb-color-hex" data-color="green" value="#00ff00" maxlength="7">
+                    </div>
+                    <div class="color-input-group-inline">
+                        <label>🟡 Yellow:</label>
+                        <input type="color" class="cmyrgb-color-picker" data-color="yellow" value="#ffff00">
+                        <input type="text" class="cmyrgb-color-hex" data-color="yellow" value="#ffff00" maxlength="7">
+                    </div>
+                    <div class="color-input-group-inline">
+                        <label>⚫ Black:</label>
+                        <input type="color" class="cmyrgb-color-picker" data-color="black" value="#000000">
+                        <input type="text" class="cmyrgb-color-hex" data-color="black" value="#000000" maxlength="7">
+                    </div>
+                    <div class="color-input-group-inline">
+                        <label>🟣 Magenta:</label>
+                        <input type="color" class="cmyrgb-color-picker" data-color="magenta" value="#ff00ff">
+                        <input type="text" class="cmyrgb-color-hex" data-color="magenta" value="#ff00ff" maxlength="7">
+                    </div>
+                    <div class="color-input-group-inline">
+                        <label>🔵 Cyan:</label>
+                        <input type="color" class="cmyrgb-color-picker" data-color="cyan" value="#00ffff">
+                        <input type="text" class="cmyrgb-color-hex" data-color="cyan" value="#00ffff" maxlength="7">
+                    </div>
+                    <div class="color-input-group-inline">
+                        <label>🔷 Blue:</label>
+                        <input type="color" class="cmyrgb-color-picker" data-color="blue" value="#0000ff">
+                        <input type="text" class="cmyrgb-color-hex" data-color="blue" value="#0000ff" maxlength="7">
+                    </div>
+                </div>
+                <div class="color-presets">
+                    <button type="button" class="btn-secondary btn-sm" onclick="resetCMYRGBColors()">Reset</button>
+                    <button type="button" class="btn-secondary btn-sm" onclick="applyDeuteranopiaColors()">Deuteranopia Safe</button>
+                    <button type="button" class="btn-secondary btn-sm" onclick="applyProtanopiaColors()">Protanopia Safe</button>
+                </div>
+            </div>
+            <button type="button" class="btn-customize" onclick="toggleCMYRGBColors()">🎨 Customize Colors</button>
+        </div>
+    `;
+    
+    resultDiv.innerHTML = html;
+    resultDiv.style.display = 'block';
+    
+    // Set up download links after the HTML is inserted
+    setupDownloadLink('downloadStandardSvg', standard.svg, 'image/svg+xml');
+    setupDownloadLink('downloadStandardPng', standard.dataUrl, 'image/png');
+    setupDownloadLink('downloadBwrgSvg', bwrg.svg, 'image/svg+xml');
+    setupDownloadLink('downloadBwrgPng', bwrg.dataUrl, 'image/png');
+    setupDownloadLink('downloadCmyrgbSvg', cmyrgb.svg, 'image/svg+xml');
+    setupDownloadLink('downloadCmyrgbPng', cmyrgb.dataUrl, 'image/png');
+    
+    // Set up EC mode radio button listeners
+    const ecRadios = document.querySelectorAll('input[name="cmyrgbEC"]');
+    ecRadios.forEach(radio => {
+        radio.addEventListener('change', handleECModeChange);
+    });
+    
+    // Update EC mode description
+    updateECModeDescription();
+    
+    // Set up color customization listeners for BWRG
+    setupBWRGColorListeners();
+    
+    // Set up color customization listeners for CMYRGB
+    setupCMYRGBColorListeners();
+}
+
+// Handle EC mode change - regenerate only CMYRGB
+async function handleECModeChange(e) {
+    const newMode = e.target.value;
+    window.currentECMode = newMode;
+    updateECModeDescription();
+    
+    // Get current text
+    const text = document.getElementById('text').value.trim();
+    if (!text) return;
+    
+    // Show loading for CMYRGB only
+    const cmyrgbDisplay = document.getElementById('cmyrgbDisplay');
+    if (cmyrgbDisplay) {
+        cmyrgbDisplay.innerHTML = '<div class="loading">🔄 Regenerating...</div>';
+    }
+    
+    try {
+        console.log(`Regenerating CMYRGB with ${newMode} mode...`);
+        const cmyrgb = await generateQR(text, { layers: 3, colours: ['cmyrgb'], errorCorrection: newMode });
+        
+        // Update display and download links
+        cmyrgbDisplay.innerHTML = cmyrgb.svg;
+        setupDownloadLink('downloadCmyrgbSvg', cmyrgb.svg, 'image/svg+xml');
+        setupDownloadLink('downloadCmyrgbPng', cmyrgb.dataUrl, 'image/png');
+    } catch (error) {
+        console.error('Regeneration error:', error);
+        cmyrgbDisplay.innerHTML = '<div class="error">❌ Failed to regenerate</div>';
+    }
+}
+
+// Update EC mode description text
+function updateECModeDescription() {
+    const descEl = document.querySelector('.ec-mode-description');
+    if (!descEl) return;
+    
+    const mode = window.currentECMode || 'parity';
+    const descriptions = {
+        standard: 'All layers EC \'L\' - Maximum capacity (~8.8KB)',
+        hybrid: 'Base layer EC \'M\' - Better reliability for critical data (~7.5KB)',
+        parity: 'Parity mode - Can recover if one layer is damaged (~5.9KB)'
+    };
+    descEl.textContent = descriptions[mode] || '';
+    
+    // Update the capacity note to reflect module size benefit
+    const capacityNote = document.getElementById('cmyrgbCapacityNote');
+    if (capacityNote) {
+        const moduleMultipliers = {
+            standard: '1.5× bigger modules for same data (3 layers)',
+            hybrid: '1.5× bigger modules for same data (3 layers, mixed EC)',
+            parity: '1.4× bigger modules for same data (2 data + 1 parity layer)'
+        };
+        capacityNote.textContent = moduleMultipliers[mode] || '1.5× bigger modules for same data';
+    }
+}
+
+// Color customization functions
+function toggleBWRGColors() {
+    const section = document.getElementById('bwrgColors');
+    if (section) {
+        section.style.display = section.style.display === 'none' ? 'block' : 'none';
+    }
+}
+
+function toggleCMYRGBColors() {
+    const section = document.getElementById('cmyrgbColorsSection');
+    if (section) {
+        section.style.display = section.style.display === 'none' ? 'block' : 'none';
+    }
+}
+
+function setupBWRGColorListeners() {
+    const pickers = document.querySelectorAll('.bwrg-color-picker');
+    const hexInputs = document.querySelectorAll('.bwrg-color-hex');
+    
+    pickers.forEach(picker => {
+        picker.addEventListener('input', (e) => {
+            const color = e.target.dataset.color;
+            const hexInput = document.querySelector(`.bwrg-color-hex[data-color="${color}"]`);
+            if (hexInput) hexInput.value = e.target.value;
+            updateBWRGColors();
+        });
+    });
+    
+    hexInputs.forEach(input => {
+        input.addEventListener('input', (e) => {
+            const val = e.target.value;
+            if (/^#[0-9A-Fa-f]{6}$/.test(val)) {
+                const color = e.target.dataset.color;
+                const picker = document.querySelector(`.bwrg-color-picker[data-color="${color}"]`);
+                if (picker) picker.value = val;
+                updateBWRGColors();
+            }
+        });
+    });
+}
+
+function setupCMYRGBColorListeners() {
+    const pickers = document.querySelectorAll('.cmyrgb-color-picker');
+    const hexInputs = document.querySelectorAll('.cmyrgb-color-hex');
+    
+    pickers.forEach(picker => {
+        picker.addEventListener('input', (e) => {
+            const color = e.target.dataset.color;
+            const hexInput = document.querySelector(`.cmyrgb-color-hex[data-color="${color}"]`);
+            if (hexInput) hexInput.value = e.target.value;
+            updateCMYRGBColors();
+        });
+    });
+    
+    hexInputs.forEach(input => {
+        input.addEventListener('input', (e) => {
+            const val = e.target.value;
+            if (/^#[0-9A-Fa-f]{6}$/.test(val)) {
+                const color = e.target.dataset.color;
+                const picker = document.querySelector(`.cmyrgb-color-picker[data-color="${color}"]`);
+                if (picker) picker.value = val;
+                updateCMYRGBColors();
+            }
+        });
+    });
+}
+
+async function updateBWRGColors() {
+    const colorOrder = ['white', 'red', 'green', 'black'];
+    window.bwrgColors = colorOrder.map(c => {
+        const picker = document.querySelector(`.bwrg-color-picker[data-color="${c}"]`);
+        return picker ? picker.value : null;
+    }).filter(Boolean);
+    
+    if (window.bwrgColors.length === 4) {
+        const text = document.getElementById('text').value.trim();
+        if (text) {
+            const bwrgDisplay = document.getElementById('bwrgDisplay');
+            if (bwrgDisplay) bwrgDisplay.innerHTML = '<div class="loading">🔄 Regenerating...</div>';
+            
+            try {
+                const bwrg = await generateQR(text, { layers: 3, colours: ['bwrg'] });
+                bwrgDisplay.innerHTML = bwrg.svg;
+                setupDownloadLink('downloadBwrgSvg', bwrg.svg, 'image/svg+xml');
+                setupDownloadLink('downloadBwrgPng', bwrg.dataUrl, 'image/png');
+            } catch (error) {
+                console.error('BWRG regeneration error:', error);
+                bwrgDisplay.innerHTML = '<div class="error">❌ Failed to regenerate</div>';
+            }
+        }
+    }
+}
+
+async function updateCMYRGBColors() {
+    const colorOrder = ['white', 'red', 'green', 'yellow', 'black', 'magenta', 'cyan', 'blue'];
+    window.cmyrgbColors = colorOrder.map(c => {
+        const picker = document.querySelector(`.cmyrgb-color-picker[data-color="${c}"]`);
+        return picker ? picker.value : null;
+    }).filter(Boolean);
+    
+    if (window.cmyrgbColors.length === 8) {
+        const text = document.getElementById('text').value.trim();
+        if (text) {
+            const cmyrgbDisplay = document.getElementById('cmyrgbDisplay');
+            if (cmyrgbDisplay) cmyrgbDisplay.innerHTML = '<div class="loading">🔄 Regenerating...</div>';
+            
+            try {
+                const currentMode = window.currentECMode || 'parity';
+                const cmyrgb = await generateQR(text, { layers: 3, colours: ['cmyrgb'], errorCorrection: currentMode });
+                cmyrgbDisplay.innerHTML = cmyrgb.svg;
+                setupDownloadLink('downloadCmyrgbSvg', cmyrgb.svg, 'image/svg+xml');
+                setupDownloadLink('downloadCmyrgbPng', cmyrgb.dataUrl, 'image/png');
+            } catch (error) {
+                console.error('CMYRGB regeneration error:', error);
+                cmyrgbDisplay.innerHTML = '<div class="error">❌ Failed to regenerate</div>';
+            }
+        }
+    }
+}
+
+function resetBWRGColors() {
+    const defaults = { white: '#ffffff', red: '#ff0000', green: '#00ff00', black: '#000000' };
+    Object.entries(defaults).forEach(([color, hex]) => {
+        const picker = document.querySelector(`.bwrg-color-picker[data-color="${color}"]`);
+        const hexInput = document.querySelector(`.bwrg-color-hex[data-color="${color}"]`);
+        if (picker) picker.value = hex;
+        if (hexInput) hexInput.value = hex;
+    });
+    window.bwrgColors = null;
+    updateBWRGColors();
+}
+
+function resetCMYRGBColors() {
+    const defaults = {
+        white: '#ffffff', red: '#ff0000', green: '#00ff00', yellow: '#ffff00',
+        black: '#000000', magenta: '#ff00ff', cyan: '#00ffff', blue: '#0000ff'
+    };
+    Object.entries(defaults).forEach(([color, hex]) => {
+        const picker = document.querySelector(`.cmyrgb-color-picker[data-color="${color}"]`);
+        const hexInput = document.querySelector(`.cmyrgb-color-hex[data-color="${color}"]`);
+        if (picker) picker.value = hex;
+        if (hexInput) hexInput.value = hex;
+    });
+    window.cmyrgbColors = null;
+    updateCMYRGBColors();
+}
+
+function applyDeuteranopiaColors() {
+    const colors = {
+        white: '#ffffff', red: '#ffa500', green: '#0080ff', yellow: '#ffff00',
+        black: '#000000', magenta: '#ff00ff', cyan: '#00ffff', blue: '#0000c0'
+    };
+    Object.entries(colors).forEach(([color, hex]) => {
+        const picker = document.querySelector(`.cmyrgb-color-picker[data-color="${color}"]`);
+        const hexInput = document.querySelector(`.cmyrgb-color-hex[data-color="${color}"]`);
+        if (picker) picker.value = hex;
+        if (hexInput) hexInput.value = hex;
+    });
+    updateCMYRGBColors();
+}
+
+function applyProtanopiaColors() {
+    const colors = {
+        white: '#ffffff', red: '#ff8800', green: '#0088ff', yellow: '#ffdd00',
+        black: '#000000', magenta: '#cc00cc', cyan: '#00cccc', blue: '#0000ff'
+    };
+    Object.entries(colors).forEach(([color, hex]) => {
+        const picker = document.querySelector(`.cmyrgb-color-picker[data-color="${color}"]`);
+        const hexInput = document.querySelector(`.cmyrgb-color-hex[data-color="${color}"]`);
+        if (picker) picker.value = hex;
+        if (hexInput) hexInput.value = hex;
+    });
+    updateCMYRGBColors();
+}
+
+function setupDownloadLink(elementId, content, mimeType) {
+    const link = document.getElementById(elementId);
+    if (!link) {
+        console.warn(`Download link element not found: ${elementId}`);
+        return;
+    }
+    
+    try {
+        if (mimeType === 'image/svg+xml') {
+            const blob = new Blob([content], { type: mimeType });
+            link.href = URL.createObjectURL(blob);
+        } else {
+            link.href = content; // Already a data URL for PNG
+        }
+    } catch (error) {
+        console.error(`Error setting up download link ${elementId}:`, error);
+    }
+}
+
+async function toggleCamera() {
+    const video = document.getElementById('video');
+    const btn = document.getElementById('cameraBtn');
+    
+    if (currentStream) {
+        // Stop camera
+        currentStream.getTracks().forEach(track => track.stop());
+        currentStream = null;
+        video.style.display = 'none';
+        btn.textContent = 'Use Camera';
+    } else {
+        // Start camera
+        try {
+            currentStream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: 'environment' } 
+            });
+            video.srcObject = currentStream;
+            video.style.display = 'block';
+            btn.textContent = 'Stop Camera';
+            
+            // Start scanning
+            scanFromVideo();
+        } catch (error) {
+            console.error('Camera error:', error);
+            alert('Could not access camera: ' + error.message);
+        }
+    }
+}
+
+function scanFromVideo() {
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0);
+        
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        
+        if (code) {
+            handleScannedCode(code.data);
+            return;
+        }
+    }
+    
+    if (currentStream) {
+        requestAnimationFrame(scanFromVideo);
+    }
+}
+
+async function handleFileUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    try {
+        // First try to decode using jsQR client-side
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const img = new Image();
+        
+        img.onload = function() {
+			console.log('Image loaded:', img.width, 'x', img.height);
+			
+			// For SPQR/color images, preserve exact pixel structure - don't scale!
+			// Scaling breaks the module grid alignment and color sampling
+			canvas.width = img.width;
+			canvas.height = img.height;
+			ctx.imageSmoothingEnabled = false;
+			ctx.drawImage(img, 0, 0);
+            
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            console.log('Scanning image data:', imageData.width, 'x', imageData.height);
+            
+            // Check if jsQR is available
+            if (typeof jsQR === 'undefined') {
+                console.error('jsQR library not loaded!');
+                displayScanResult({ 
+                    standard: null, 
+                    spqr: { base: null, red: null, combined: null } 
+                });
+                return;
+            }
+            
+            const code = jsQR(imageData.data, imageData.width, imageData.height);
+            console.log('jsQR result:', code);
+            
+            if (code) {
+                console.log('QR code found:', code.data);
+                // Standard QR code detected
+                displayScanResult({ standard: code.data, spqr: null });
+            } else {
+                console.log('No standard QR detected by jsQR, checking for SPQR...');
+                // Try to detect SPQR by looking for color patterns
+                const spqrResult = detectSPQR(imageData);
+                if (spqrResult) {
+                    displayScanResult({ standard: null, spqr: spqrResult });
+                } else {
+                    displayScanResult({ 
+                        standard: null, 
+                        spqr: { base: null, red: null, combined: null } 
+                    });
+                }
+            }
+        };
+        
+        img.onerror = function() {
+            alert('Error loading image file');
+        };
+        
+        img.src = URL.createObjectURL(file);
+        
+    } catch (error) {
+        console.error('Upload error:', error);
+        alert('Error processing image: ' + error.message);
+    }
+}
+
+function detectSPQR(imageData) {
+    const { data, width, height } = imageData;
+    
+    console.log(`SPQR detection starting: ${width}x${height} image`);
+    
+    // First, detect if this has color patterns and which type
+    let redPixels = 0, greenPixels = 0, bluePixels = 0;
+    let cyanPixels = 0, magentaPixels = 0, yellowPixels = 0;
+    let blackPixels = 0, whitePixels = 0;
+    let totalPixels = 0;
+    
+    // Sample every 4th pixel to check for colors
+    for (let i = 0; i < data.length; i += 16) { // 16 = 4 pixels * 4 bytes per pixel
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        
+        totalPixels++;
+        
+        // Classify pixels (more lenient thresholds for custom colors)
+        if (r < 50 && g < 50 && b < 50) {
+            blackPixels++;
+        } else if (r > 200 && g > 200 && b > 200) {
+            whitePixels++;
+        } else if (r > 150 && g < 80 && b < 80) {
+            redPixels++; // Red dominant (allows #cc0000)
+        } else if (r < 80 && g > 150 && b < 80) {
+            greenPixels++; // Green dominant (allows #00aa00)
+        } else if (r < 80 && g < 80 && b > 150) {
+            bluePixels++; // Blue dominant
+        } else if (r < 80 && g > 150 && b > 150) {
+            cyanPixels++; // Cyan = green + blue
+        } else if (r > 150 && g < 80 && b > 150) {
+            magentaPixels++; // Magenta = red + blue
+        } else if (r > 150 && g > 150 && b < 80) {
+            yellowPixels++; // Yellow = red + green
+        }
+    }
+    
+    const bwrgColors = redPixels + greenPixels;
+    const cmyrgbColors = cyanPixels + magentaPixels + yellowPixels + bluePixels;
+    const colorPercentage = (bwrgColors + cmyrgbColors) / totalPixels;
+    
+    console.log(`SPQR pixel analysis: ${blackPixels} black, ${whitePixels} white`);
+    console.log(`  BWRG: ${redPixels} red, ${greenPixels} green`);
+    console.log(`  CMYRGB: ${cyanPixels} cyan, ${magentaPixels} magenta, ${yellowPixels} yellow, ${bluePixels} blue`);
+    console.log(`  Color ratio: ${colorPercentage.toFixed(3)}`);
+    
+    // If we have significant color content, try to decode SPQR
+    if (colorPercentage > 0.01) { // More than 1% coloured pixels
+        // Determine which type based on color distribution
+        if (cmyrgbColors > bwrgColors) {
+            console.log('CMYRGB (8-color) SPQR detected, attempting decode...');
+            return decodeCMYRGBLayers(imageData);
+        } else {
+            console.log('BWRG (4-color) SPQR detected, attempting decode...');
+        return decodeSPQRLayers(imageData);
+        }
+    }
+    
+    return null;
+}
+
+// SPQR decoder with known grid structure (fallback when jsQR fails)
+function decodeSPQRWithKnownGrid(data, width, height) {
+    console.log('Attempting SPQR decode with known grid structure...');
+    
+    try {
+        // Assume common SPQR structure: 21x21 or 25x25 modules + 4 margin
+        // Start by estimating module size from image dimensions
+        const possibleModuleCounts = [21, 25, 29, 33]; // Common QR sizes
+        const margin = 4;
+        
+        let bestMatch = null;
+        let bestScore = 0;
+        
+        for (const modules of possibleModuleCounts) {
+            const totalModules = modules + 2 * margin;
+            const estimatedModulePx = Math.min(width, height) / totalModules; // float px per module
+            
+            if (estimatedModulePx < 3 || estimatedModulePx > 50) continue;
+            
+            // Test this grid by looking for color patterns
+            const score = testGridStructure(data, width, height, modules, margin, estimatedModulePx);
+            console.log(`Testing ${modules}x${modules} grid (${estimatedModulePx}px/module): score ${score}`);
+            
+            if (score > bestScore) {
+                bestScore = score;
+                bestMatch = { modules, margin, modulePx: estimatedModulePx };
+            }
+        }
+        
+        if (!bestMatch || bestScore < 0.1) {
+            return {
+                base: 'Could not determine SPQR grid structure',
+                red: null,
+                combined: `Tested grids but no good match (best score: ${bestScore.toFixed(3)})`
+            };
+        }
+        
+        console.log(`Using grid: ${bestMatch.modules}x${bestMatch.modules}, ${bestMatch.modulePx}px/module`);
+        
+        // Refine origin by maximising finder match
+        const origin = refineGridOrigin(data, width, height, bestMatch.modules, bestMatch.margin, bestMatch.modulePx);
+        console.log(`Refined origin: (${origin.originX}, ${origin.originY})`);
+        // Extract color layers using the determined grid and refined origin
+        return extractAndDecodeColorLayers(data, width, height, { ...bestMatch, originX: origin.originX, originY: origin.originY });
+        
+    } catch (error) {
+        console.error('Known grid decode error:', error);
+        return {
+            base: 'Grid decode error: ' + error.message,
+            red: null,
+            combined: null
+        };
+    }
+}
+
+function testGridStructure(data, width, height, modules, margin, modulePx) {
+    // Test if this grid structure makes sense by checking color distribution
+    let colorPixels = 0;
+    let totalSamples = 0;
+    
+    // Sample a few modules to see if we have good color separation
+    for (let my = margin; my < modules + margin; my += 3) {
+        for (let mx = margin; mx < modules + margin; mx += 3) {
+            const px = Math.round(mx * modulePx + modulePx / 2);
+            const py = Math.round(my * modulePx + modulePx / 2);
+            
+            if (px >= 0 && px < width && py >= 0 && py < height) {
+                const i = (py * width + px) * 4;
+                const r = data[i], g = data[i + 1], b = data[i + 2];
+                
+                totalSamples++;
+                
+                // Check if this pixel is colored (not black/white)
+                // Count strong chroma or strong black as valid module signal
+                const isRed = r > 140 && r > g + 40 && r > b + 40;
+                const isGreen = g > 140 && g > r + 40 && g > b + 40;
+                const isBlack = r < 70 && g < 70 && b < 70;
+                if (isRed || isGreen || isBlack) colorPixels++;
+            }
+        }
+    }
+    
+    const colorRatio = totalSamples > 0 ? colorPixels / totalSamples : 0;
+    return colorRatio; // Higher score means more color pixels (better SPQR candidate)
+}
+
+// Try small origin offsets around the nominal origin to maximise finder pattern score
+function refineGridOrigin(data, width, height, modules, margin, modulePx) {
+    const search = Math.max(1, Math.floor(modulePx / 3));
+    // Compute rough bounding box of non-white content to derive nominal origin
+    let minX = width, minY = height, maxX = 0, maxY = 0;
+    for (let y = 0; y < height; y += Math.max(1, Math.floor(modulePx/2))) {
+        for (let x = 0; x < width; x += Math.max(1, Math.floor(modulePx/2))) {
+            const i = (y*width + x) * 4;
+            const r = data[i], g = data[i+1], b = data[i+2];
+            const nonWhite = !(r > 235 && g > 235 && b > 235);
+            if (nonWhite) {
+                if (x < minX) minX = x;
+                if (y < minY) minY = y;
+                if (x > maxX) maxX = x;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+    // Nominal origin aims so that min edges correspond to 4-module quiet zone
+    const nominalX = isFinite(minX) ? Math.round(minX - margin * modulePx) : 0;
+    const nominalY = isFinite(minY) ? Math.round(minY - margin * modulePx) : 0;
+    let best = { originX: nominalX, originY: nominalY, score: -Infinity };
+    // Scan a small window of offsets
+    for (let oy = -search; oy <= search; oy++) {
+        for (let ox = -search; ox <= search; ox++) {
+            const score = scoreFindersAtOrigin(data, width, height, modules, margin, modulePx, nominalX + ox, nominalY + oy);
+            if (score > best.score) best = { originX: nominalX + ox, originY: nominalY + oy, score };
+        }
+    }
+    return { originX: best.originX, originY: best.originY };
+}
+
+function scoreFindersAtOrigin(data, width, height, modules, margin, modulePx, offX, offY) {
+    // Evaluate how well the three 7x7 finders match black/white pattern
+    const centers = [
+        { gx: 3, gy: 3 },
+        { gx: modules - 4, gy: 3 },
+        { gx: 3, gy: modules - 4 }
+    ];
+    let score = 0;
+    for (const c of centers) {
+        for (let dy = 0; dy < 7; dy++) {
+            for (let dx = 0; dx < 7; dx++) {
+                const onBorder = (dx === 0 || dx === 6 || dy === 0 || dy === 6);
+                const inCenter = (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
+                const shouldDark = onBorder || inCenter;
+                const fx = Math.round(offX + (c.gx + dx + margin) * modulePx + modulePx / 2);
+                const fy = Math.round(offY + (c.gy + dy + margin) * modulePx + modulePx / 2);
+                if (fx < 0 || fy < 0 || fx >= width || fy >= height) continue;
+                const i = (fy * width + fx) * 4;
+                const r = data[i], g = data[i+1], b = data[i+2];
+                const isDark = r < 80 && g < 80 && b < 80;
+                score += (isDark === shouldDark) ? 1 : -1;
+            }
+        }
+    }
+    return score;
+}
+
+function extractAndDecodeColorLayers(data, width, height, gridInfo) {
+    const { modules, margin, modulePx } = gridInfo;
+    const baseOffsetX = gridInfo.originX ?? 0;
+    const baseOffsetY = gridInfo.originY ?? 0;
+    
+    console.log('Extracting color layers from grid...');
+    
+    // Create binary layers based on color classification
+    const baseLayer = [];
+    const redLayer = [];
+    
+    for (let my = 0; my < modules; my++) {
+        const baseRow = [];
+        const redRow = [];
+        
+        for (let mx = 0; mx < modules; mx++) {
+            const cx = baseOffsetX + (mx + margin) * modulePx + modulePx / 2;
+            const cy = baseOffsetY + (my + margin) * modulePx + modulePx / 2;
+            
+            // Robust subpixel sampling (3x3 around center)
+            const step = Math.max(1, Math.floor(modulePx / 4));
+            let rSum = 0, gSum = 0, bSum = 0, count = 0;
+            for (let dy = -step; dy <= step; dy += step) {
+                for (let dx = -step; dx <= step; dx += step) {
+                    const sx = Math.round(cx + dx);
+                    const sy = Math.round(cy + dy);
+                    if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+                        const idx = (sy * width + sx) * 4;
+                        rSum += data[idx];
+                        gSum += data[idx + 1];
+                        bSum += data[idx + 2];
+                        count++;
+                    }
+                }
+            }
+            const r = count ? Math.round(rSum / count) : 255;
+            const g = count ? Math.round(gSum / count) : 255;
+            const b = count ? Math.round(bSum / count) : 255;
+            
+            // Classify pixel color: 0=white, 1=red, 2=green, 3=black (with extra tolerance)
+            const isBlack = r < 80 && g < 80 && b < 80;
+            const isRed = r > 135 && r > g + 35 && r > b + 35;
+            const isGreen = g > 135 && g > r + 35 && g > b + 35;
+            
+            // Layer mapping for discrete BWRG:
+            // Base layer: black OR green (green = overlap)
+            // Red layer: red OR green (green = overlap)
+            const baseBit = isBlack || isGreen;
+            const redBit = isRed || isGreen;
+            
+            baseRow.push(baseBit);
+            redRow.push(redBit);
+        }
+        
+        baseLayer.push(baseRow);
+        redLayer.push(redRow);
+    }
+    
+    // Denoise with majority filter to mitigate single-module misclassifications
+    majorityFilterInPlace(baseLayer);
+    majorityFilterInPlace(redLayer);
+    
+    // Enforce standard finder patterns on both layers within the module grid
+    enforceFindersOnBinary(baseLayer);
+    enforceFindersOnBinary(redLayer);
+    // Enforce timing patterns (row 6 / column 6 alternating), excluding finder areas
+    enforceTimingPatterns(baseLayer);
+    enforceTimingPatterns(redLayer);
+    
+    console.log('Color layers extracted, attempting decoding...');
+    
+    // Try to decode each layer
+    const baseText = decodeLayerDirect(baseLayer, 'base');
+    const redText = decodeLayerDirect(redLayer, 'red');
+    
+    const results = [baseText, redText].filter(Boolean);
+    const combined = results.join('');
+    
+    return {
+        base: baseText || 'Base layer decode failed',
+        red: redText || 'Red layer decode failed',
+        combined: combined || 'No layers decoded successfully'
+    };
+}
+
+function decodeLayerDirect(binaryLayer, layerName) {
+    console.log(`Decoding ${layerName} layer (${binaryLayer.length}x${binaryLayer[0].length})...`);
+    
+    // Convert binary layer to RGBA for jsQR
+    const modules = binaryLayer.length;
+    const quiet = 4; // quiet zone modules
+    const scale = 8; // Scale up for better jsQR performance
+    const outModules = modules + quiet * 2;
+    const scaledSize = outModules * scale;
+    const rgba = new Uint8ClampedArray(scaledSize * scaledSize * 4);
+    
+    for (let y = 0; y < scaledSize; y++) {
+        for (let x = 0; x < scaledSize; x++) {
+            const gx = Math.floor(x / scale) - quiet; // grid x in data modules
+            const gy = Math.floor(y / scale) - quiet; // grid y in data modules
+            let isDark = false;
+            if (gx >= 0 && gx < modules && gy >= 0 && gy < modules) {
+                isDark = binaryLayer[gy][gx];
+            } else {
+                isDark = false; // quiet zone
+            }
+            
+            const i = (y * scaledSize + x) * 4;
+            const value = isDark ? 0 : 255;
+            rgba[i] = rgba[i + 1] = rgba[i + 2] = value;
+            rgba[i + 3] = 255;
+        }
+    }
+    
+    const result = jsQR(rgba, scaledSize, scaledSize);
+    console.log(`${layerName} layer result:`, result ? `"${result.data}"` : 'null');
+    return result ? result.data : null;
+}
+
+// Enforce standard finder patterns (7x7) at TL, TR, BL in the binary module grid
+function enforceFindersOnBinary(binary) {
+    const modules = binary.length;
+    if (!modules || modules < 21) return;
+    const drawFinderAt = (gx, gy) => {
+        for (let dy = 0; dy < 7; dy++) {
+            for (let dx = 0; dx < 7; dx++) {
+                const onBorder = (dx === 0 || dx === 6 || dy === 0 || dy === 6);
+                const inCenter = (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
+                const dark = onBorder || inCenter;
+                const yy = gy + dy;
+                const xx = gx + dx;
+                if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
+                    binary[yy][xx] = dark;
+                }
+            }
+        }
+    };
+    // TL
+    drawFinderAt(0, 0);
+    // TR
+    drawFinderAt(modules - 7, 0);
+    // BL
+    drawFinderAt(0, modules - 7);
+}
+
+// Enforce timing patterns (alternating dark/light) on row 6 and column 6
+function enforceTimingPatterns(binary) {
+    const n = binary.length;
+    if (n < 21) return;
+    const inFinder = (x, y) => (x < 7 && y < 7) || (x >= n-7 && y < 7) || (x < 7 && y >= n-7);
+    // Row 6
+    for (let x = 0; x < n; x++) {
+        if (inFinder(x, 6)) continue;
+        binary[6][x] = ((x % 2) === 0);
+    }
+    // Column 6
+    for (let y = 0; y < n; y++) {
+        if (inFinder(6, y)) continue;
+        binary[y][6] = ((y % 2) === 0);
+    }
+}
+
+// Simple majority filter over 8-neighbourhood to reduce salt-and-pepper noise
+function majorityFilterInPlace(binary) {
+    const n = binary.length;
+    const m = binary[0].length;
+    const out = new Array(n);
+    for (let y = 0; y < n; y++) {
+        out[y] = new Array(m);
+        for (let x = 0; x < m; x++) {
+            let dark = 0, total = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    const yy = y + dy, xx = x + dx;
+                    if (yy >= 0 && yy < n && xx >= 0 && xx < m) {
+                        dark += binary[yy][xx] ? 1 : 0;
+                        total++;
+                    }
+                }
+            }
+            out[y][x] = dark >= Math.ceil(total / 2);
+        }
+    }
+    for (let y = 0; y < n; y++) {
+        for (let x = 0; x < m; x++) binary[y][x] = out[y][x];
+    }
+}
+
+// Direct SPQR decoder using color-aware approach
+function decodeSPQRDirect(imageData) {
+    const { data, width, height } = imageData;
+    
+    console.log('SPQR direct decoder: creating color-aware matrix...');
+    
+    try {
+        // Convert to grayscale first for jsQR structure detection
+        const grayData = new Uint8ClampedArray(width * height * 4);
+        for (let i = 0; i < data.length; i += 4) {
+            const r = data[i], g = data[i + 1], b = data[i + 2];
+            // Convert any non-white pixel to black for structure detection
+            const isLight = r > 200 && g > 200 && b > 200;
+            const gray = isLight ? 255 : 0;
+            grayData[i] = grayData[i + 1] = grayData[i + 2] = gray;
+            grayData[i + 3] = 255;
+        }
+        
+        // Use jsQR to locate the QR structure on grayscale version
+        const jsqrResult = jsQR(grayData, width, height);
+        if (!jsqrResult || !jsqrResult.location) {
+            console.log('jsQR could not locate QR structure, falling back to grid estimation...');
+            
+            // Fallback: Use known SPQR grid structure (assume 21x21 modules + 4 margin)
+            return decodeSPQRWithKnownGrid(data, width, height);
+        }
+        
+        console.log('QR structure located, building color matrix...');
+        const location = jsqrResult.location;
+        
+        // Calculate QR dimensions from corner positions
+        const topLeft = location.topLeftCorner;
+        const topRight = location.topRightCorner;
+        const bottomLeft = location.bottomLeftCorner;
+        
+        const topDistance = Math.sqrt((topRight.x - topLeft.x)**2 + (topRight.y - topLeft.y)**2);
+        const leftDistance = Math.sqrt((bottomLeft.x - topLeft.x)**2 + (bottomLeft.y - topLeft.y)**2);
+        const avgDistance = (topDistance + leftDistance) / 2;
+        
+        const modulePixels = avgDistance / 14; // 14 modules between finder centers
+        let qrModules = Math.round(avgDistance / modulePixels) + 7;
+        
+        // Ensure valid QR size
+        while ((qrModules - 17) % 4 !== 0) {
+            qrModules++;
+        }
+        qrModules = Math.max(21, Math.min(177, qrModules));
+        
+        console.log(`Color matrix: ${qrModules}x${qrModules} modules, ${modulePixels.toFixed(1)}px per module`);
+        
+        // Create color matrix
+        const colorMatrix = [];
+        for (let y = 0; y < qrModules; y++) {
+            const row = [];
+            for (let x = 0; x < qrModules; x++) {
+                const pixelX = Math.round(topLeft.x + (x - 3.5) * modulePixels);
+                const pixelY = Math.round(topLeft.y + (y - 3.5) * modulePixels);
+                
+                if (pixelX >= 0 && pixelX < width && pixelY >= 0 && pixelY < height) {
+                    const i = (pixelY * width + pixelX) * 4;
+                    const r = data[i], g = data[i + 1], b = data[i + 2];
+                    
+                    // Classify pixel color: 0=white, 1=red, 2=green, 3=black
+                    let colorCode = 0;
+                    if (r < 80 && g < 80 && b < 80) colorCode = 3; // black
+                    else if (r > 150 && r > g + 50 && r > b + 50) colorCode = 1; // red
+                    else if (g > 150 && g > r + 50 && g > b + 50) colorCode = 2; // green
+                    else colorCode = 0; // white (or unknown -> white)
+                    
+                    row.push(colorCode);
+                } else {
+                    row.push(0); // white outside bounds
+                }
+            }
+            colorMatrix.push(row);
+        }
+        
+        console.log('Color matrix created, extracting layers...');
+        
+        // Extract binary layers from color matrix
+        // Layer A (base): white(0) + black(3) -> dark
+        // Layer B (red): red(1) + green(2) -> dark
+        const createLayer = (darkColors) => {
+            const layer = [];
+            for (let y = 0; y < qrModules; y++) {
+                const row = [];
+                for (let x = 0; x < qrModules; x++) {
+                    row.push(darkColors.includes(colorMatrix[y][x]));
+                }
+                layer.push(row);
+            }
+            return layer;
+        };
+        
+        const baseLayer = createLayer([0, 3]); // white + black  
+        const redLayer = createLayer([1, 2]);  // red + green
+        
+        console.log('Layers extracted, attempting decode...');
+        
+        // Decode each layer
+        const decodeLayer = (binaryLayer, layerName) => {
+            const scale = 4;
+            const scaledSize = qrModules * scale;
+            const rgba = new Uint8ClampedArray(scaledSize * scaledSize * 4);
+            
+            for (let y = 0; y < scaledSize; y++) {
+                for (let x = 0; x < scaledSize; x++) {
+                    const sourceX = Math.floor(x / scale);
+                    const sourceY = Math.floor(y / scale);
+                    const isDark = binaryLayer[sourceY][sourceX];
+                    
+                    const i = (y * scaledSize + x) * 4;
+                    const value = isDark ? 0 : 255;
+                    rgba[i] = rgba[i + 1] = rgba[i + 2] = value;
+                    rgba[i + 3] = 255;
+                }
+            }
+            
+            const result = jsQR(rgba, scaledSize, scaledSize);
+            console.log(`${layerName} decode result:`, result ? `"${result.data}"` : 'null');
+            return result ? result.data : null;
+        };
+        
+        const baseResult = decodeLayer(baseLayer, 'Base layer');
+        const redResult = decodeLayer(redLayer, 'Red layer');
+        
+        const results = [baseResult, redResult].filter(Boolean);
+        const combined = results.join('');
+        
+        return {
+            base: baseResult || 'Base layer decode failed',
+            red: redResult || 'Red layer decode failed', 
+            combined: combined || 'No layers decoded successfully'
+        };
+        
+    } catch (error) {
+        console.error('SPQR direct decode error:', error);
+        return {
+            base: 'Decode error: ' + error.message,
+            red: null,
+            combined: null
+        };
+    }
+}
+
+// Integrated SPQR decoder using jsQR algorithms adapted for multi-layer
+function decodeSPQRLayersSimple(imageData) {
+    const { data, width, height } = imageData;
+    
+    try {
+        console.log('SPQR decoder: analyzing multi-layer structure...');
+        
+        // Step 1: Detect QR structure using any non-white pixel
+        // This gives us the finder patterns and overall QR geometry
+        const structureBinary = createBinaryMatrix(data, width, height, (r, g, b) => r < 240 || g < 240 || b < 240);
+        const qrLocation = locateQR(structureBinary);
+        
+        if (!qrLocation) {
+            console.log('Failed to locate QR structure in SPQR');
+            return {
+                base: 'SPQR structure not found',
+                red: null,
+                combined: 'Could not detect QR finder patterns',
+                debugImages: []
+            };
+        }
+        
+        console.log('QR structure located:', qrLocation);
+        
+        // Step 2: Detect color scheme by sampling finder key areas
+        const colorScheme = detectColorScheme(data, width, height, qrLocation);
+        console.log('Detected color scheme:', colorScheme);
+        
+        // Step 3: Extract individual color layers based on the scheme
+        const layers = extractColorLayers(data, width, height, qrLocation, colorScheme);
+        
+        // Step 4: Decode each layer individually
+        const results = [];
+        for (let i = 0; i < layers.length; i++) {
+            try {
+                console.log(`Processing layer ${i}...`);
+                const layerBinary = layers[i];
+                const extracted = extractQRBits(layerBinary, qrLocation);
+                console.log(`Layer ${i} extracted:`, extracted ? 'success' : 'failed');
+                if (extracted) {
+                    const decoded = decodeQRData(extracted);
+                    console.log(`Layer ${i} decoded:`, decoded || 'failed');
+                    if (decoded) {
+                        results.push(decoded);
+                        console.log(`Layer ${i} decoded: "${decoded}"`);
+                    }
+                }
+            } catch (error) {
+                console.error(`Error processing layer ${i}:`, error);
+            }
+        }
+        
+        if (results.length === 0) {
+            return {
+                base: 'SPQR structure found but no layers decoded successfully',
+                red: null,
+                combined: `Color scheme: ${colorScheme.name} (${colorScheme.description})`,
+                debugImages: layers.map((layer, i) => ({ name: `layer-${i}`, dataUrl: binaryToDataUrl(width, height, layer) }))
+            };
+        }
+        
+        // Return results
+        const baseText = results[0] || 'No base layer';
+        const redText = results[1] || 'No red layer';
+        const combined = results.length > 1 ? results.join(' | ') : results[0];
+        
+        return {
+            base: baseText,
+            red: redText,
+            combined: `✅ ${combined} | ${colorScheme.description}`,
+            debugImages: layers.map((layer, i) => ({ name: `layer-${i}`, dataUrl: binaryToDataUrl(width, height, layer) }))
+        };
+
+    } catch (error) {
+        console.error('SPQR decode error:', error);
+        return {
+            base: 'SPQR decode failed: ' + error.message,
+            red: null,
+            combined: null,
+            debugImages: []
+        };
+    }
+}
+
+// Create binary matrix from image data using a predicate function
+function createBinaryMatrix(data, width, height, isDarkPredicate) {
+    const matrix = new Array(height);
+    for (let y = 0; y < height; y++) {
+        matrix[y] = new Array(width);
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            const r = data[i], g = data[i+1], b = data[i+2];
+            matrix[y][x] = isDarkPredicate(r, g, b) ? 1 : 0;
+        }
+    }
+    return matrix;
+}
+
+// Locate QR structure using jsQR directly instead of manual finder detection
+function locateQR(binary) {
+    const height = binary.length;
+    const width = binary[0].length;
+    
+    console.log(`Attempting QR location on ${width}x${height} binary matrix`);
+    
+    // Convert binary matrix to RGBA for jsQR
+    const scale = 1; // Try original size first
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            const val = binary[y][x] ? 0 : 255; // 1 = black, 0 = white
+            rgba[i] = rgba[i+1] = rgba[i+2] = val;
+            rgba[i+3] = 255;
+        }
+    }
+    
+    // Try jsQR to locate the QR structure
+    const jsqrResult = jsQR(rgba, width, height);
+    if (jsqrResult && jsqrResult.location) {
+        console.log('jsQR found QR structure:', jsqrResult.location);
+        const loc = jsqrResult.location;
+        
+        // Extract corner positions
+        const topLeft = loc.topLeftCorner;
+        const topRight = loc.topRightCorner;
+        const bottomLeft = loc.bottomLeftCorner;
+        
+        // Estimate module size from corner distances
+        const topDistance = Math.sqrt((topRight.x - topLeft.x)**2 + (topRight.y - topLeft.y)**2);
+        const leftDistance = Math.sqrt((bottomLeft.x - topLeft.x)**2 + (bottomLeft.y - topLeft.y)**2);
+        const avgDistance = (topDistance + leftDistance) / 2;
+        
+        // QR version 1 = 21 modules, finders are 7 modules apart, so 14 modules between finder centers
+        const moduleSize = Math.round(avgDistance / 14);
+        const dimension = 21; // Assume version 1 for now
+        
+        console.log(`QR located: moduleSize=${moduleSize}, dimension=${dimension}`);
+        
+        return {
+            topLeft,
+            topRight,
+            bottomLeft,
+            moduleSize,
+            dimension
+        };
+    }
+    
+    console.log('jsQR could not locate QR structure, falling back to manual detection');
+    
+    // Fallback to manual finder detection (simplified)
+    const finderCandidates = [];
+    
+    // Scan horizontal lines for finder patterns (more frequent scanning)
+    for (let y = 0; y < height; y += Math.max(1, Math.floor(height/10))) {
+        const runs = getRuns(binary[y]);
+        const patterns = findFinderPatterns(runs);
+        
+        for (const pattern of patterns) {
+            if (verifyFinderPattern(binary, pattern.x, y, pattern.moduleSize)) {
+                finderCandidates.push({ x: pattern.x, y, moduleSize: pattern.moduleSize });
+            }
+        }
+    }
+    
+    console.log(`Manual detection: Found ${finderCandidates.length} finder candidates`);
+    
+    if (finderCandidates.length < 3) {
+        console.log(`Found only ${finderCandidates.length} finder candidates, need at least 3`);
+        return null;
+    }
+    
+    // Cluster candidates and find the best 3
+    const finders = clusterFinders(finderCandidates);
+    if (finders.length < 3) return null;
+    
+    // Order finders as topLeft, topRight, bottomLeft
+    const ordered = orderFinders(finders[0], finders[1], finders[2]);
+    
+    // Calculate QR dimensions and module size
+    const avgModuleSize = (finders[0].moduleSize + finders[1].moduleSize + finders[2].moduleSize) / 3;
+    const dimension = calculateDimension(ordered.topLeft, ordered.topRight, ordered.bottomLeft, avgModuleSize);
+    
+    return {
+        topLeft: ordered.topLeft,
+        topRight: ordered.topRight, 
+        bottomLeft: ordered.bottomLeft,
+        moduleSize: avgModuleSize,
+        dimension
+    };
+}
+
+// Get black/white run lengths from a binary row
+function getRuns(row) {
+    const runs = [];
+    let currentRun = 0;
+    let currentColor = row[0];
+    
+    for (let x = 0; x < row.length; x++) {
+        if (row[x] === currentColor) {
+            currentRun++;
+        } else {
+            runs.push({ color: currentColor, length: currentRun, endX: x - 1 });
+            currentColor = row[x];
+            currentRun = 1;
+        }
+    }
+    runs.push({ color: currentColor, length: currentRun, endX: row.length - 1 });
+    return runs;
+}
+
+// Find potential finder patterns in run sequence
+function findFinderPatterns(runs) {
+    const patterns = [];
+    
+    for (let i = 2; i < runs.length - 2; i++) {
+        const [r1, r2, r3, r4, r5] = [runs[i-2], runs[i-1], runs[i], runs[i+1], runs[i+2]];
+        
+        // Check for 1:1:3:1:1 dark:light:dark:light:dark pattern
+        if (r1.color && !r2.color && r3.color && !r4.color && r5.color) {
+            const [l1, l2, l3, l4, l5] = [r1.length, r2.length, r3.length, r4.length, r5.length];
+            const total = l1 + l2 + l3 + l4 + l5;
+            
+            if (total >= 10) {
+                const ratios = [l1, l2, l3, l4, l5].map(len => len / total);
+                
+                // Check for 1:1:3:1:1 ratios (relaxed tolerance for SPQR)
+                if (Math.abs(ratios[0] - 0.14) < 0.12 && 
+                    Math.abs(ratios[1] - 0.14) < 0.12 && 
+                    Math.abs(ratios[2] - 0.43) < 0.25 && 
+                    Math.abs(ratios[3] - 0.14) < 0.12 && 
+                    Math.abs(ratios[4] - 0.14) < 0.12) {
+                    
+                    const centerX = r1.endX - l1 + 1 + l1 + l2 + Math.floor(l3/2);
+                    const moduleSize = Math.max(3, Math.round(l3 / 3));
+                    
+                    patterns.push({ x: centerX, moduleSize });
+                }
+            }
+        }
+    }
+    
+    return patterns;
+}
+
+// Verify finder pattern by checking vertical 1:1:3:1:1 ratio
+function verifyFinderPattern(binary, x, y, moduleSize) {
+    if (y < moduleSize * 3 || y >= binary.length - moduleSize * 3) return false;
+    if (x < moduleSize * 3 || x >= binary[0].length - moduleSize * 3) return false;
+    
+    // Sample vertical line at x
+    const verticalRuns = [];
+    let currentColor = binary[y - moduleSize * 3][x];
+    let currentRun = 1;
+    
+    for (let dy = -moduleSize * 3 + 1; dy <= moduleSize * 3; dy++) {
+        const color = binary[y + dy][x];
+        if (color === currentColor) {
+            currentRun++;
+        } else {
+            verticalRuns.push(currentRun);
+            currentColor = color;
+            currentRun = 1;
+        }
+    }
+    verticalRuns.push(currentRun);
+    
+    // Check if we have 5 runs in 1:1:3:1:1 ratio
+    if (verticalRuns.length >= 5) {
+        const midStart = Math.floor((verticalRuns.length - 5) / 2);
+        const [l1, l2, l3, l4, l5] = verticalRuns.slice(midStart, midStart + 5);
+        const total = l1 + l2 + l3 + l4 + l5;
+        const ratios = [l1, l2, l3, l4, l5].map(len => len / total);
+        
+        return Math.abs(ratios[0] - 0.14) < 0.15 && 
+               Math.abs(ratios[1] - 0.14) < 0.15 && 
+               Math.abs(ratios[2] - 0.43) < 0.3 && 
+               Math.abs(ratios[3] - 0.14) < 0.15 && 
+               Math.abs(ratios[4] - 0.14) < 0.15;
+    }
+    
+    return false;
+}
+
+// Cluster finder candidates into 3 distinct positions
+function clusterFinders(candidates) {
+    // Simple clustering: group candidates within 5 module distance
+    const clusters = [];
+    
+    for (const candidate of candidates) {
+        let foundCluster = false;
+        for (const cluster of clusters) {
+            const dx = candidate.x - cluster.x;
+            const dy = candidate.y - cluster.y;
+            const distance = Math.sqrt(dx*dx + dy*dy);
+            
+            if (distance < candidate.moduleSize * 5) {
+                cluster.x = (cluster.x * cluster.count + candidate.x) / (cluster.count + 1);
+                cluster.y = (cluster.y * cluster.count + candidate.y) / (cluster.count + 1);
+                cluster.moduleSize = (cluster.moduleSize * cluster.count + candidate.moduleSize) / (cluster.count + 1);
+                cluster.count++;
+                foundCluster = true;
+                break;
+            }
+        }
+        
+        if (!foundCluster) {
+            clusters.push({
+                x: candidate.x,
+                y: candidate.y,
+                moduleSize: candidate.moduleSize,
+                count: 1
+            });
+        }
+    }
+    
+    // Return top 3 strongest clusters
+    return clusters.sort((a, b) => b.count - a.count).slice(0, 3);
+}
+
+// Order three finders as topLeft, topRight, bottomLeft
+function orderFinders(f1, f2, f3) {
+    // Calculate distances
+    const d12 = Math.sqrt((f1.x - f2.x)**2 + (f1.y - f2.y)**2);
+    const d13 = Math.sqrt((f1.x - f3.x)**2 + (f1.y - f3.y)**2);
+    const d23 = Math.sqrt((f2.x - f3.x)**2 + (f2.y - f3.y)**2);
+    
+    // Find bottomLeft (closest to the other two)
+    let bottomLeft, topLeft, topRight;
+    if (d23 >= d12 && d23 >= d13) {
+        [bottomLeft, topLeft, topRight] = [f1, f2, f3];
+    } else if (d13 >= d12 && d13 >= d23) {
+        [bottomLeft, topLeft, topRight] = [f2, f1, f3];
+    } else {
+        [bottomLeft, topLeft, topRight] = [f3, f1, f2];
+    }
+    
+    // Use cross product to determine if topRight and bottomLeft need swapping
+    const crossProduct = (topRight.x - topLeft.x) * (bottomLeft.y - topLeft.y) - 
+                        (topRight.y - topLeft.y) * (bottomLeft.x - topLeft.x);
+    
+    if (crossProduct < 0) {
+        [bottomLeft, topRight] = [topRight, bottomLeft];
+    }
+    
+    return { topLeft, topRight, bottomLeft };
+}
+
+// Calculate QR dimension from finder positions
+function calculateDimension(topLeft, topRight, bottomLeft, moduleSize) {
+    const distance = (a, b) => Math.sqrt((a.x - b.x)**2 + (a.y - b.y)**2);
+    
+    const topDistance = distance(topLeft, topRight);
+    const leftDistance = distance(topLeft, bottomLeft);
+    const avgDistance = (topDistance + leftDistance) / 2;
+    
+    let dimension = Math.round(avgDistance / moduleSize) + 7; // Add 7 for finders
+    
+    // Ensure dimension follows QR spec (must be 4n + 1)
+    while ((dimension - 17) % 4 !== 0) {
+        dimension++;
+    }
+    
+    return Math.min(177, Math.max(21, dimension)); // QR bounds
+}
+
+// Helper to convert binary matrix to data URL for debugging
+function binaryToDataUrl(width, height, binary) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const imageData = ctx.createImageData(width, height);
+    
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            const value = binary[y][x] ? 0 : 255;
+            imageData.data[i] = imageData.data[i+1] = imageData.data[i+2] = value;
+            imageData.data[i+3] = 255;
+        }
+    }
+    
+    ctx.putImageData(imageData, 0, 0);
+    return canvas.toDataURL();
+}
+
+// Placeholder functions for color scheme detection and layer extraction
+function detectColorScheme(data, width, height, qrLocation) {
+    // Sample finder key areas to determine BWRG vs CMYRGB vs custom
+    return { name: 'BWRG', description: '4-color Black/White/Red/Green scheme (~2× capacity)' };
+}
+
+function extractColorLayers(data, width, height, qrLocation, colorScheme) {
+    // Extract individual color layers based on discrete composition
+    // In discrete mode: Green = overlap where BOTH base and red layers have data
+    
+    console.log('Extracting color layers for', colorScheme.name, 'scheme');
+    
+    // Classify pixels into color categories
+    const isBlack = (r, g, b) => r < 80 && g < 80 && b < 80;
+    const isRed = (r, g, b) => r > g + 50 && r > b + 50 && r > 100;
+    const isGreen = (r, g, b) => g > r + 50 && g > b + 50 && g > 100;
+    const isWhite = (r, g, b) => r > 200 && g > 200 && b > 200;
+    
+    // Base layer: Black OR Green (green represents overlap)
+    const baseLayer = createBinaryMatrix(data, width, height, (r, g, b) => {
+        return isBlack(r, g, b) || isGreen(r, g, b);
+    });
+    
+    // Red layer: Red OR Green (green represents overlap) 
+    const redLayer = createBinaryMatrix(data, width, height, (r, g, b) => {
+        return isRed(r, g, b) || isGreen(r, g, b);
+    });
+    
+    console.log('Extracted layers: base and red with green overlap handling');
+    return [baseLayer, redLayer];
+}
+
+function extractQRBits(binary, qrLocation) {
+    // Convert the binary matrix back to RGBA format for jsQR
+    const height = binary.length;
+    const width = binary[0].length;
+    
+    // Create a copy of the binary matrix to add synthetic finders
+    const enhanced = binary.map(row => [...row]);
+    
+    // Add synthetic finder patterns using the detected QR structure
+    if (qrLocation && qrLocation.moduleSize) {
+        addSyntheticFinders(enhanced, width, height, qrLocation);
+    }
+    
+    // Convert to RGBA
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            const value = enhanced[y][x] ? 0 : 255; // 1 = black, 0 = white
+            rgba[i] = rgba[i+1] = rgba[i+2] = value;
+            rgba[i+3] = 255;
+        }
+    }
+    
+    return { rgba, width, height };
+}
+
+// Add synthetic 7x7 finder patterns to the binary matrix
+function addSyntheticFinders(binary, width, height, qrLocation) {
+    const { moduleSize } = qrLocation;
+    
+    // Estimate QR grid parameters
+    const margin = 4; // Standard margin
+    const totalQRSize = 25; // From dimension detection
+    const gridModulePx = Math.round(moduleSize);
+    
+    // Calculate finder positions in pixel coordinates
+    const finderPositions = [
+        { x: margin * gridModulePx, y: margin * gridModulePx }, // Top-left
+        { x: (totalQRSize - 7 - margin) * gridModulePx, y: margin * gridModulePx }, // Top-right  
+        { x: margin * gridModulePx, y: (totalQRSize - 7 - margin) * gridModulePx }  // Bottom-left
+    ];
+    
+    // Draw each 7x7 finder pattern
+    for (const pos of finderPositions) {
+        drawFinderPattern(binary, width, height, pos.x, pos.y, gridModulePx);
+    }
+}
+
+// Draw a standard 7x7 QR finder pattern at the specified position
+function drawFinderPattern(binary, width, height, startX, startY, modulePx) {
+    // Standard QR finder pattern: 7x7 grid with 1:1:3:1:1 structure
+    const pattern = [
+        [1,1,1,1,1,1,1],
+        [1,0,0,0,0,0,1], 
+        [1,0,1,1,1,0,1],
+        [1,0,1,1,1,0,1],
+        [1,0,1,1,1,0,1],
+        [1,0,0,0,0,0,1],
+        [1,1,1,1,1,1,1]
+    ];
+    
+    for (let my = 0; my < 7; my++) {
+        for (let mx = 0; mx < 7; mx++) {
+            const isDark = pattern[my][mx];
+            
+            // Paint the entire module
+            for (let dy = 0; dy < modulePx; dy++) {
+                for (let dx = 0; dx < modulePx; dx++) {
+                    const px = startX + mx * modulePx + dx;
+                    const py = startY + my * modulePx + dy;
+                    
+                    if (px >= 0 && px < width && py >= 0 && py < height) {
+                        binary[py][px] = isDark;
+                    }
+                }
+            }
+        }
+    }
+}
+
+function decodeQRData(extracted) {
+    // Use jsQR directly on the extracted RGBA data
+    try {
+        if (!extracted || !extracted.rgba) {
+            console.log('No extracted data for decoding');
+            return null;
+        }
+        const { rgba, width, height } = extracted;
+        console.log(`Decoding ${width}x${height} RGBA with jsQR`);
+        
+        const result = jsQR(rgba, width, height);
+        if (result && result.data) {
+            console.log('jsQR decoded:', result.data);
+            return result.data;
+        } else {
+            console.log('jsQR could not decode the layer');
+            return null;
+        }
+    } catch (error) {
+        console.error('Error in decodeQRData:', error);
+        return null;
+    }
+}
+
+// The internal decoder functions have been removed.
+// We now use jsQR directly for SPQR layer decoding.
+
+function decodeSPQRLayers(imageData) {
+    const { data, width, height } = imageData;
+    try {
+		console.log('🔍 SPQR 4-colour decoder starting:', `${width}×${height}px`);
+		
+		// Get active color palette (custom or default)
+		const palette = window.bwrgColors || ['#ffffff', '#ff0000', '#00ff00', '#000000'];
+		
+		// Convert hex colors to RGB
+		const hexToRgb = (hex) => {
+			const r = parseInt(hex.slice(1, 3), 16);
+			const g = parseInt(hex.slice(3, 5), 16);
+			const b = parseInt(hex.slice(5, 7), 16);
+			return { r, g, b };
+		};
+		
+		const paletteRgb = {
+			'W': hexToRgb(palette[0]), // White
+			'R': hexToRgb(palette[1]), // Red
+			'G': hexToRgb(palette[2]), // Green
+			'K': hexToRgb(palette[3])  // Black
+		};
+		
+		console.log('   Using color palette:', window.bwrgColors ? 'CUSTOM' : 'DEFAULT');
+		
+		// Step 1: Classify pixels using nearest-neighbor color matching
+		const classifyPixel = (r, g, b) => {
+			// BWRG: White, Black, Red, Green
+			// Find nearest color using Euclidean distance
+			let minDist = Infinity;
+			let bestColor = 'W';
+			
+			for (const [colorName, rgb] of Object.entries(paletteRgb)) {
+				const dist = Math.sqrt(
+					Math.pow(r - rgb.r, 2) +
+					Math.pow(g - rgb.g, 2) +
+					Math.pow(b - rgb.b, 2)
+				);
+				
+				if (dist < minDist) {
+					minDist = dist;
+					bestColor = colorName;
+				}
+			}
+			
+			return bestColor;
+		};
+		
+	// Step 2: Detect grid structure from image dimensions
+	// SPQR images have: margin (4 modules) + QR data + margin (4 modules)
+	// Generator creates BWRG with 5px/module
+        const margin = 4;
+	const expectedPxPerModule = 5; // BWRG codes use 5px per module
+	
+	// Find the best match by checking all common QR sizes
+	let bestModules = 21;
+	let bestModulePx = width / (21 + 2 * margin);
+	let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
+	let bestScore = Math.abs(Math.round(bestModulePx) - expectedPxPerModule);
+	
+	// QR codes range from Version 1 (21×21) to Version 40 (177×177), incrementing by 4
+	for (let testModules = 21; testModules <= 177; testModules += 4) {
+		const testModulePx = width / (testModules + 2 * margin);
+		const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
+		const roundedModulePx = Math.round(testModulePx);
+		const distanceFromExpected = Math.abs(roundedModulePx - expectedPxPerModule);
+		
+		// Skip if pixels per module would be too small (< 2px)
+		if (roundedModulePx < 2) continue;
+		
+		// Prefer: 1) Better remainder, 2) Closer to expected px/module
+		if (testRemainder < bestRemainder || 
+		    (testRemainder === bestRemainder && distanceFromExpected < bestScore)) {
+			bestRemainder = testRemainder;
+			bestModulePx = testModulePx;
+			bestModules = testModules;
+			bestScore = distanceFromExpected;
+		}
+	}
+	
+	const modules = bestModules;
+	const modulePx = Math.round(bestModulePx);
+	
+	console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module (remainder: ${bestRemainder.toFixed(3)})`);
+		
+		// Step 3: Sample each QR module and build binary layers
+		// In BWRG SPQR: BLACK → base layer, RED → red layer, GREEN → both layers
+		const baseMods = [];
+		const redMods = [];
+		
+		for (let my = 0; my < modules; my++) {
+			const baseRow = [];
+			const redRow = [];
+			
+			for (let mx = 0; mx < modules; mx++) {
+				// Sample from centre of module (including margin offset)
+				const cx = Math.round((margin + mx + 0.5) * modulePx);
+				const cy = Math.round((margin + my + 0.5) * modulePx);
+				
+				// Sample 3×3 pixels around centre for robustness
+				const samples = [];
+				for (let dy = -1; dy <= 1; dy++) {
+					for (let dx = -1; dx <= 1; dx++) {
+						const px = Math.max(0, Math.min(width - 1, cx + dx));
+						const py = Math.max(0, Math.min(height - 1, cy + dy));
+						const idx = (py * width + px) * 4;
+						const colour = classifyPixel(data[idx], data[idx + 1], data[idx + 2]);
+						samples.push(colour);
+					}
+				}
+				
+				// Majority vote on colour
+				const colourCounts = {};
+				samples.forEach(c => colourCounts[c] = (colourCounts[c] || 0) + 1);
+				const moduleColour = Object.keys(colourCounts).reduce((a, b) => 
+					colourCounts[a] > colourCounts[b] ? a : b
+				);
+				
+				// Map colour to layer bits
+				// WHITE (00): base=light, red=light
+				// RED   (01): base=light, red=dark
+				// GREEN (11): base=dark,  red=dark  (overlap)
+				// BLACK (10): base=dark,  red=light
+				const baseIsDark = (moduleColour === 'K' || moduleColour === 'G');
+				const redIsDark = (moduleColour === 'R' || moduleColour === 'G');
+				
+				baseRow.push(baseIsDark);
+				redRow.push(redIsDark);
+			}
+			
+			baseMods.push(baseRow);
+			redMods.push(redRow);
+		}
+		
+	console.log('   Base layer row 0 (raw):', baseMods[0].map(b => b ? '█' : '·').join(''));
+	console.log('   Red  layer row 0 (raw):', redMods[0].map(b => b ? '█' : '·').join(''));
+	
+	// Step 3.5: Enforce finder and alignment patterns on BOTH layers
+	// Get alignment pattern positions for a given QR version
+	const getAlignmentPatternPositions = (version) => {
+		if (version === 1) return [];
+		// Alignment pattern center positions by version (from QR spec)
+		const positions = [
+			[], // Version 1
+			[6, 18], [6, 22], [6, 26], [6, 30], [6, 34], // Versions 2-6
+			[6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50], [6, 30, 54], [6, 32, 58], [6, 34, 62], // Versions 7-13
+			[6, 26, 46, 66], [6, 26, 48, 70], [6, 26, 50, 74], [6, 30, 54, 78], [6, 30, 56, 82], [6, 30, 58, 86], [6, 34, 62, 90], // Versions 14-20
+			[6, 28, 50, 72, 94], [6, 26, 50, 74, 98], [6, 30, 54, 78, 102], [6, 28, 54, 80, 106], [6, 32, 58, 84, 110], [6, 30, 58, 86, 114], [6, 34, 62, 90, 118], // Versions 21-27
+			[6, 26, 50, 74, 98, 122], [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130], [6, 30, 56, 82, 108, 134], [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142], [6, 34, 62, 90, 118, 146], // Versions 28-34
+			[6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154], [6, 28, 54, 80, 106, 132, 158], [6, 32, 58, 84, 110, 136, 162], [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170] // Versions 35-40
+		];
+		return positions[version - 1] || [];
+	};
+	
+	const enforceFinders = (mods) => {
+		const version = 1 + (modules - 21) / 4;
+		
+		// Draw finder patterns (7x7)
+		const drawFinder = (ox, oy) => {
+			for (let dy = 0; dy < 7; dy++) {
+				for (let dx = 0; dx < 7; dx++) {
+					const onBorder = (dx === 0 || dx === 6 || dy === 0 || dy === 6);
+					const inCenter = (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
+					const xx = ox + dx;
+					const yy = oy + dy;
+					if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
+						mods[yy][xx] = onBorder || inCenter;
+					}
+				}
+			}
+		};
+		drawFinder(0, 0);
+		drawFinder(modules - 7, 0);
+		drawFinder(0, modules - 7);
+		
+		// Draw alignment patterns (5x5)
+		const drawAlignment = (cx, cy) => {
+			for (let dy = -2; dy <= 2; dy++) {
+				for (let dx = -2; dx <= 2; dx++) {
+					const onBorder = (Math.abs(dx) === 2 || Math.abs(dy) === 2);
+					const inCenter = (dx === 0 && dy === 0);
+					const xx = cx + dx;
+					const yy = cy + dy;
+					if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
+						mods[yy][xx] = onBorder || inCenter;
+					}
+				}
+			}
+		};
+		
+		const alignmentPos = getAlignmentPatternPositions(version);
+		const inFinder = (x, y) => {
+			return (x < 9 && y < 9) || (x >= modules - 9 && y < 9) || (x < 9 && y >= modules - 9);
+		};
+		
+		// Draw alignment patterns at all position combinations, except where finders are
+		for (let i = 0; i < alignmentPos.length; i++) {
+			for (let j = 0; j < alignmentPos.length; j++) {
+				const x = alignmentPos[j];
+				const y = alignmentPos[i];
+				// Skip if overlaps with finder pattern
+				if (!inFinder(x, y)) {
+					drawAlignment(x, y);
+				}
+			}
+		}
+		
+		// Draw timing patterns
+		for (let x = 0; x < modules; x++) {
+			if (!inFinder(x, 6)) mods[6][x] = (x % 2) === 0;
+		}
+		for (let y = 0; y < modules; y++) {
+			if (!inFinder(6, y)) mods[y][6] = (y % 2) === 0;
+		}
+	};
+	
+	enforceFinders(baseMods);
+	enforceFinders(redMods);
+	
+	console.log('   Base layer row 0 (fixed):', baseMods[0].map(b => b ? '█' : '·').join(''));
+	console.log('   Red  layer row 0 (fixed):', redMods[0].map(b => b ? '█' : '·').join(''));
+	
+	// Step 4: Use jsQR to decode each layer
+		const decodeLayer = (mods, layerName) => {
+			// Scale up for jsQR (now has alignment patterns so moderate scale is fine)
+			const scale = 8;
+			const scaledSize = modules * scale;
+			const rgba = new Uint8ClampedArray(scaledSize * scaledSize * 4);
+			
+			for (let y = 0; y < scaledSize; y++) {
+				for (let x = 0; x < scaledSize; x++) {
+					const my = Math.floor(y / scale);
+					const mx = Math.floor(x / scale);
+					const isDark = mods[my][mx];
+					
+					const idx = (y * scaledSize + x) * 4;
+					const val = isDark ? 0 : 255;
+					rgba[idx] = rgba[idx + 1] = rgba[idx + 2] = val;
+					rgba[idx + 3] = 255;
+				}
+			}
+			
+			const result = jsQR(rgba, scaledSize, scaledSize);
+			if (result) {
+				console.log(`   ✅ ${layerName} decoded: "${result.data}"`);
+				return result.data;
+			} else {
+				console.log(`   ❌ ${layerName} decode failed`);
+				return null;
+			}
+		};
+		
+		const baseText = decodeLayer(baseMods, 'Base layer');
+		const redText = decodeLayer(redMods, 'Red layer');
+		
+		const combined = (baseText || '') + (redText || '');
+		
+		return {
+			base: baseText,
+			red: redText,
+			combined: combined || null,
+			partial: combined ? null : 'Decode failed'
+		};
+		
+	} catch (error) {
+		console.error('❌ SPQR decode error:', error);
+		return {
+			base: null,
+			red: null,
+			combined: null,
+			partial: 'Error: ' + error.message
+		};
+	}
+}
+
+// CMYRGB (8-color) SPQR decoder for 3-layer codes
+function decodeCMYRGBLayers(imageData) {
+	const { data, width, height } = imageData;
+	try {
+		console.log('🔍 SPQR 8-colour (CMYRGB) decoder starting:', `${width}×${height}px`);
+		
+		// Get active color palette (custom or default)
+		const palette = window.cmyrgbColors || ['#ffffff', '#ff0000', '#00ff00', '#ffff00', '#000000', '#ff00ff', '#00ffff', '#0000ff'];
+		
+		// Convert hex colors to RGB
+		const hexToRgb = (hex) => {
+			const r = parseInt(hex.slice(1, 3), 16);
+			const g = parseInt(hex.slice(3, 5), 16);
+			const b = parseInt(hex.slice(5, 7), 16);
+			return { r, g, b };
+		};
+		
+		const paletteRgb = {
+			'W': hexToRgb(palette[0]), // White
+			'R': hexToRgb(palette[1]), // Red
+			'G': hexToRgb(palette[2]), // Green
+			'Y': hexToRgb(palette[3]), // Yellow
+			'K': hexToRgb(palette[4]), // Black
+			'M': hexToRgb(palette[5]), // Magenta
+			'C': hexToRgb(palette[6]), // Cyan
+			'B': hexToRgb(palette[7])  // Blue
+		};
+		
+		console.log('   Using color palette:', window.cmyrgbColors ? 'CUSTOM' : 'DEFAULT');
+		
+		// Step 1: Classify pixels using nearest-neighbor color matching
+		const classifyPixel = (r, g, b) => {
+			// CMYRGB color mapping (used in generator):
+			// White (W): C=0, M=0, Y=0
+			// Cyan  (C): C=1, M=0, Y=0
+			// Magenta(M):C=0, M=1, Y=0
+			// Yellow(Y): C=0, M=0, Y=1
+			// Red   (R): C=0, M=1, Y=1
+			// Green (G): C=1, M=0, Y=1
+			// Blue  (B): C=1, M=1, Y=0
+			// Black (K): C=1, M=1, Y=1
+			
+			// Find nearest color using Euclidean distance
+			let minDist = Infinity;
+			let bestColor = 'W';
+			
+			for (const [colorName, rgb] of Object.entries(paletteRgb)) {
+				const dist = Math.sqrt(
+					Math.pow(r - rgb.r, 2) +
+					Math.pow(g - rgb.g, 2) +
+					Math.pow(b - rgb.b, 2)
+				);
+				
+				if (dist < minDist) {
+					minDist = dist;
+					bestColor = colorName;
+				}
+			}
+			
+			return bestColor;
+		};
+		
+		// Step 2: Detect grid structure
+		// Generator creates CMYRGB with 6px/module
+		const margin = 4;
+		const expectedPxPerModule = 6; // CMYRGB codes use 6px per module
+		
+		let bestModules = 21;
+		let bestModulePx = width / (21 + 2 * margin);
+		let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
+		let bestScore = Math.abs(Math.round(bestModulePx) - expectedPxPerModule);
+		
+		for (let testModules = 21; testModules <= 177; testModules += 4) {
+			const testModulePx = width / (testModules + 2 * margin);
+			const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
+			const roundedModulePx = Math.round(testModulePx);
+			const distanceFromExpected = Math.abs(roundedModulePx - expectedPxPerModule);
+			
+			// Skip if pixels per module would be too small (< 2px)
+			if (roundedModulePx < 2) continue;
+			
+			// Prefer: 1) Better remainder, 2) Closer to expected px/module (6px)
+			if (testRemainder < bestRemainder || 
+			    (testRemainder === bestRemainder && distanceFromExpected < bestScore)) {
+				bestRemainder = testRemainder;
+				bestModulePx = testModulePx;
+				bestModules = testModules;
+				bestScore = distanceFromExpected;
+			}
+		}
+		
+		const modules = bestModules;
+		const modulePx = Math.round(bestModulePx);
+		
+		console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module`);
+		
+		// Step 3: Sample modules and decompose into 3 layers
+		// Note: Despite names, these map to baseQr, greenQr, redQr in the generator
+		const baseMods = [];    // bit 2 in encoding
+		const greenMods = [];   // bit 1 in encoding
+		const redMods = [];     // bit 0 in encoding
+		
+		for (let my = 0; my < modules; my++) {
+			const baseRow = [];
+			const greenRow = [];
+			const redRow = [];
+			
+			for (let mx = 0; mx < modules; mx++) {
+				const cx = Math.round((margin + mx + 0.5) * modulePx);
+				const cy = Math.round((margin + my + 0.5) * modulePx);
+				
+				// Sample 3×3 for robustness
+				const samples = [];
+				for (let dy = -1; dy <= 1; dy++) {
+					for (let dx = -1; dx <= 1; dx++) {
+						const px = Math.max(0, Math.min(width - 1, cx + dx));
+						const py = Math.max(0, Math.min(height - 1, cy + dy));
+						const idx = (py * width + px) * 4;
+						const color = classifyPixel(data[idx], data[idx + 1], data[idx + 2]);
+						samples.push(color);
+					}
+				}
+				
+				// Majority vote
+				const counts = {};
+				samples.forEach(c => counts[c] = (counts[c] || 0) + 1);
+				const majorityColor = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
+				
+				// Generator uses: code = (b<<2) | (g<<1) | r
+				// where b=baseQr(bit2), g=greenQr(bit1), r=redQr(bit0)
+				// Palette: W=000, R=001, G=010, Y=011, K=100, M=101, C=110, B=111
+				const bBit = ['K', 'M', 'C', 'B'].includes(majorityColor); // bit 2
+				const gBit = ['G', 'Y', 'C', 'B'].includes(majorityColor); // bit 1
+				const rBit = ['R', 'Y', 'M', 'B'].includes(majorityColor); // bit 0
+				
+				baseRow.push(bBit);
+				greenRow.push(gBit);
+				redRow.push(rBit);
+			}
+			
+			baseMods.push(baseRow);
+			greenMods.push(greenRow);
+			redMods.push(redRow);
+		}
+		
+		// Step 4: Enforce finders on all layers
+		// Get alignment pattern positions for a given QR version
+		const getAlignmentPatternPositions = (version) => {
+			if (version === 1) return [];
+			// Alignment pattern center positions by version (from QR spec)
+			const positions = [
+				[], // Version 1
+				[6, 18], [6, 22], [6, 26], [6, 30], [6, 34], // Versions 2-6
+				[6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50], [6, 30, 54], [6, 32, 58], [6, 34, 62], // Versions 7-13
+				[6, 26, 46, 66], [6, 26, 48, 70], [6, 26, 50, 74], [6, 30, 54, 78], [6, 30, 56, 82], [6, 30, 58, 86], [6, 34, 62, 90], // Versions 14-20
+				[6, 28, 50, 72, 94], [6, 26, 50, 74, 98], [6, 30, 54, 78, 102], [6, 28, 54, 80, 106], [6, 32, 58, 84, 110], [6, 30, 58, 86, 114], [6, 34, 62, 90, 118], // Versions 21-27
+				[6, 26, 50, 74, 98, 122], [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130], [6, 30, 56, 82, 108, 134], [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142], [6, 34, 62, 90, 118, 146], // Versions 28-34
+				[6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154], [6, 28, 54, 80, 106, 132, 158], [6, 32, 58, 84, 110, 136, 162], [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170] // Versions 35-40
+			];
+			return positions[version - 1] || [];
+		};
+		
+		const enforceFinders = (mods) => {
+			const version = 1 + (modules - 21) / 4;
+			
+			// Draw finder patterns (7x7)
+			const drawFinder = (ox, oy) => {
+				for (let dy = 0; dy < 7; dy++) {
+					for (let dx = 0; dx < 7; dx++) {
+						const onBorder = (dx === 0 || dx === 6 || dy === 0 || dy === 6);
+						const inCenter = (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
+						const xx = ox + dx;
+						const yy = oy + dy;
+						if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
+							mods[yy][xx] = onBorder || inCenter;
+						}
+					}
+				}
+			};
+			drawFinder(0, 0);
+			drawFinder(modules - 7, 0);
+			drawFinder(0, modules - 7);
+			
+			// Draw alignment patterns (5x5)
+			const drawAlignment = (cx, cy) => {
+				for (let dy = -2; dy <= 2; dy++) {
+					for (let dx = -2; dx <= 2; dx++) {
+						const onBorder = (Math.abs(dx) === 2 || Math.abs(dy) === 2);
+						const inCenter = (dx === 0 && dy === 0);
+						const xx = cx + dx;
+						const yy = cy + dy;
+						if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
+							mods[yy][xx] = onBorder || inCenter;
+						}
+					}
+				}
+			};
+			
+			const alignmentPos = getAlignmentPatternPositions(version);
+			const inFinder = (x, y) => {
+				return (x < 9 && y < 9) || (x >= modules - 9 && y < 9) || (x < 9 && y >= modules - 9);
+			};
+			
+			// Draw alignment patterns at all position combinations, except where finders are
+			for (let i = 0; i < alignmentPos.length; i++) {
+				for (let j = 0; j < alignmentPos.length; j++) {
+					const x = alignmentPos[j];
+					const y = alignmentPos[i];
+					// Skip if overlaps with finder pattern
+					if (!inFinder(x, y)) {
+						drawAlignment(x, y);
+					}
+				}
+			}
+			
+			// Draw timing patterns
+			for (let x = 0; x < modules; x++) {
+				if (!inFinder(x, 6)) mods[6][x] = (x % 2) === 0;
+			}
+			for (let y = 0; y < modules; y++) {
+				if (!inFinder(6, y)) mods[y][6] = (y % 2) === 0;
+			}
+		};
+		
+		enforceFinders(baseMods);
+		enforceFinders(greenMods);
+		enforceFinders(redMods);
+		
+		// Step 5: Decode layers
+		const decodeLayer = (mods, layerName) => {
+			// Scale up for jsQR (now has alignment patterns so moderate scale is fine)
+			const scale = 8;
+			const scaledSize = modules * scale;
+			const rgba = new Uint8ClampedArray(scaledSize * scaledSize * 4);
+			
+			for (let y = 0; y < scaledSize; y++) {
+				for (let x = 0; x < scaledSize; x++) {
+					const my = Math.floor(y / scale);
+					const mx = Math.floor(x / scale);
+					const isDark = mods[my][mx];
+					
+					const idx = (y * scaledSize + x) * 4;
+					const val = isDark ? 0 : 255;
+					rgba[idx] = rgba[idx + 1] = rgba[idx + 2] = val;
+					rgba[idx + 3] = 255;
+				}
+			}
+			
+			const result = jsQR(rgba, scaledSize, scaledSize);
+			if (result) {
+				console.log(`   ✅ ${layerName}: "${result.data}"`);
+				return result.data;
+			} else {
+				console.log(`   ❌ ${layerName} failed`);
+				return null;
+			}
+		};
+		
+		const baseText = decodeLayer(baseMods, 'Base layer');
+		const greenText = decodeLayer(greenMods, 'Green layer');
+		const redText = decodeLayer(redMods, 'Red layer');
+		
+		// Check if this is parity mode (green layer starts with SPQRv1|)
+		let combined = null;
+		let parityInfo = null;
+		
+		if (greenText && greenText.startsWith('SPQRv1|')) {
+			// Parity mode: green is parity data
+			console.log('🔐 Parity mode detected, verifying...');
+			const verification = verifyWithParity(baseText, redText, greenText);
+			parityInfo = verification;
+			
+			if (verification.recovered) {
+				// One layer was corrupt but recovered
+				const recoveredBase = verification.recovered.layer === 'base' ? verification.recovered.data : baseText;
+				const recoveredRed = verification.recovered.layer === 'red' ? verification.recovered.data : redText;
+				combined = recoveredBase + recoveredRed;
+				console.log(`✅ Data recovered using parity: ${combined.length} bytes`);
+			} else if (verification.valid) {
+				// Both layers intact
+				combined = (baseText || '') + (redText || '');
+				console.log(`✅ Data verified with parity: ${combined.length} bytes`);
+			} else {
+				// Both layers corrupt, can't recover
+				combined = null;
+				console.log(`❌ Both layers corrupt, recovery failed`);
+			}
+		} else {
+			// Standard or hybrid mode: all 3 layers are data
+			combined = (baseText || '') + (redText || '') + (greenText || '');
+		}
+		
+            return {
+			base: baseText,
+			green: greenText,
+			red: redText,
+                combined: combined || null,
+			parity: parityInfo
+		};
+		
+    } catch (error) {
+		console.error('❌ CMYRGB decode error:', error);
+        return {
+            base: null,
+			green: null,
+            red: null,
+			combined: null
+        };
+    }
+}
+
+function handleScannedCode(data) {
+    displayScanResult({ standard: data, spqr: null });
+}
+
+function displayScanResult(result) {
+    const scanResultDiv = document.getElementById('scanResult');
+    
+    let html = '<h3>📱 Scan Results:</h3>';
+    let textToUse = null;
+    
+    if (result.standard) {
+        textToUse = result.standard;
+        html += `<div class="scan-result-item success">
+            <strong>✅ Standard QR Code decoded!</strong><br>
+            <small>${result.standard.length} characters</small>
+        </div>`;
+    }
+    
+    if (result.spqr && (result.spqr.base || result.spqr.red || result.spqr.combined)) {
+        textToUse = result.spqr.combined || result.spqr.base || '';
+        const layers = [result.spqr.base, result.spqr.red, result.spqr.green].filter(Boolean).length;
+        const parityInfo = result.spqr.parity ? ' (with parity recovery)' : '';
+        html += `<div class="scan-result-item success">
+            <strong>✅ SPQR ${layers}-layer QR Code decoded${parityInfo}!</strong><br>
+            <small>${textToUse.length} characters</small>
+                </div>`;
+    }
+    
+    if (!result.standard && (!result.spqr || (!result.spqr.base && !result.spqr.red && !result.spqr.combined))) {
+        html += `<div class="scan-result-item error">
+            <strong>❌ No QR Code Found</strong><br>
+            Make sure the image contains a clear, readable QR code.<br>
+            <small>💡 Tip: Try better lighting or a clearer image.</small>
+        </div>`;
+    }
+    
+    scanResultDiv.innerHTML = html;
+    scanResultDiv.style.display = 'block';
+    
+    // Auto-fill text box and generate variants
+    if (textToUse) {
+        fillTextBox(textToUse);
+    }
+}
+
+async function fillTextBox(text) {
+    const textArea = document.getElementById('text');
+    textArea.value = text;
+    textArea.focus();
+    
+    // Auto-generate all variants after filling the text
+    console.log('Auto-generating variants for scanned text:', text);
+    try {
+        await autoGenerateVariants(text);
+    } catch (error) {
+        console.error('Auto-generation failed:', error);
+    }
+    
+    // Scroll to results
+    const resultDiv = document.getElementById('result');
+    if (resultDiv && resultDiv.style.display !== 'none') {
+        resultDiv.scrollIntoView({ behavior: 'smooth' });
+    }
+}
+
+async function autoGenerateVariants(text) {
+    if (!text.trim()) return;
+    
+    // Show loading in result div
+    const resultDiv = document.getElementById('result');
+    resultDiv.innerHTML = '<h2>🔄 Generating QR Codes...</h2><p class="loading">Creating all variants...</p>';
+    resultDiv.style.display = 'block';
+    
+    try {
+        // Get current EC mode (default to parity for best reliability)
+        const currentMode = window.currentECMode || 'parity';
+        
+        // Generate all three variants
+        console.log('Auto-generating standard QR...');
+        const standard = await generateQR(text, { layers: 1, colours: ['k'] });
+        
+        console.log('Auto-generating BWRG SPQR...');
+        const bwrg = await generateQR(text, { layers: 3, colours: ['bwrg'] });
+        
+        console.log(`Auto-generating CMYRGB SPQR (${currentMode} mode)...`);
+        const cmyrgb = await generateQR(text, { layers: 3, colours: ['cmyrgb'], errorCorrection: currentMode });
+
+        // Display results
+        displayResults(standard, bwrg, cmyrgb);
+        
+    } catch (error) {
+        console.error('Auto-generation error:', error);
+        resultDiv.innerHTML = '<h2>❌ Generation Failed</h2><p class="error">' + error.message + '</p>';
+    }
+}
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+    if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
+    }
+});
+
+function matrixFromModules(mods) {
+    return {
+        width: mods.length,
+        height: mods.length,
+        get(x, y) {
+            return Boolean(mods[y]?.[x]);
+        }
+    };
+}
+
+function majorityFilterModules(mods) {
+    const n = mods.length;
+    const out = Array.from({ length: n }, () => Array(n).fill(false));
+    for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+            let dark = 0, total = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    const yy = y + dy, xx = x + dx;
+                    if (yy >= 0 && yy < n && xx >= 0 && xx < n) {
+                        total++;
+                        dark += mods[yy][xx] ? 1 : 0;
+                    }
+                }
+            }
+            out[y][x] = dark >= Math.ceil(total / 2);
+        }
+    }
+    for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) mods[y][x] = out[y][x];
+    }
+}
+function enforceFunctionPatternsModules(mods) {
+    const n = mods.length;
+    const drawFinder = (ox, oy) => {
+        for (let dy = 0; dy < 7; dy++) {
+            for (let dx = 0; dx < 7; dx++) {
+                const onBorder = dx === 0 || dx === 6 || dy === 0 || dy === 6;
+                const inCenter = dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4;
+                const yy = oy + dy, xx = ox + dx;
+                if (yy >= 0 && yy < n && xx >= 0 && xx < n) mods[yy][xx] = onBorder || inCenter;
+            }
+        }
+    };
+    drawFinder(0, 0);
+    drawFinder(n - 7, 0);
+    drawFinder(0, n - 7);
+    const inFinder = (x, y) => (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7);
+    for (let x = 0; x < n; x++) if (!inFinder(x, 6)) mods[6][x] = (x % 2) === 0;
+    for (let y = 0; y < n; y++) if (!inFinder(6, y)) mods[y][6] = (y % 2) === 0;
+}
+
+function decodeMatrixGuessMaskBrowser(mods) {
+    try {
+        return decodeMatrixGuessMask(matrixFromModules(mods));
+    } catch (err) {
+        console.error('Internal decode failed:', err);
+        return null;
+    }
+}
+
+function logDebug(...args) { console.log(...args); }
+
+async function testSPQRRoundTrip() {
+	console.log('🧪 Testing SPQR 4-colour round-trip...');
+	
+	// Test with progressively longer strings
+	const testCases = [
+		'Hello',
+		'Hello World!',
+		'SPQR Test 123'
+	];
+	
+	for (const testText of testCases) {
+		console.log(`\n━━━ Testing: "${testText}" ━━━`);
+		
+		try {
+			// Generate BWRG SPQR
+			console.log('1. Generating BWRG SPQR...');
+			const result = await generateQR(testText, { layers: 3, colours: ['bwrg'] });
+			
+			if (!result.dataUrl) {
+				console.error('❌ Generation failed: no dataUrl');
+				continue;
+			}
+			
+			// Convert dataUrl to ImageData for testing
+			console.log('2. Converting to ImageData...');
+    const img = new Image();
+			await new Promise((resolve, reject) => {
+				img.onload = resolve;
+				img.onerror = reject;
+				img.src = result.dataUrl;
+			});
+			
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+			const ctx = canvas.getContext('2d', { willReadFrequently: true });
+			ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(img, 0, 0);
+        
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+			console.log(`   Image: ${canvas.width}×${canvas.height}px`);
+			
+			// Analyse colour distribution
+			console.log('3. Analysing colours...');
+			const colourCounts = { white: 0, red: 0, green: 0, black: 0, other: 0 };
+			for (let i = 0; i < imageData.data.length; i += 4) {
+				const r = imageData.data[i];
+				const g = imageData.data[i + 1];
+				const b = imageData.data[i + 2];
+				
+				if (r > 240 && g > 240 && b > 240) colourCounts.white++;
+				else if (r < 20 && g < 20 && b < 20) colourCounts.black++;
+				else if (r > 240 && g < 20 && b < 20) colourCounts.red++;
+				else if (r < 20 && g > 240 && b < 20) colourCounts.green++;
+				else colourCounts.other++;
+			}
+			console.log('   Colour distribution:', colourCounts);
+			
+			// Try to decode
+			console.log('4. Attempting decode...');
+        const decoded = detectSPQR(imageData);
+			
+			if (!decoded) {
+				console.error('❌ detectSPQR returned null');
+				continue;
+			}
+			
+			console.log('   Decoded:', decoded);
+			
+			// Check results
+			const combined = decoded.combined || (decoded.base || '') + (decoded.red || '');
+			if (combined === testText) {
+				console.log(`✅ PERFECT MATCH: "${combined}"`);
+			} else if (combined) {
+				console.log(`❌ MISMATCH:`);
+				console.log(`   Expected: "${testText}"`);
+				console.log(`   Got:      "${combined}"`);
+        } else {
+				console.log(`❌ NO DECODE`);
+			}
+			
+		} catch (error) {
+			console.error('❌ Test error:', error);
+		}
+	}
+	
+	console.log('\n━━━ Test complete ━━━\n');
+}
+
+// Expose test function globally
+window.testSPQRRoundTrip = testSPQRRoundTrip;
+
+// Announce test availability
+setTimeout(() => {
+	console.log('%c🧪 SPQR Test Available!', 'font-size: 16px; font-weight: bold; color: #00ff00;');
+	console.log('%cRun testSPQRRoundTrip() in console to test encoding/decoding', 'font-size: 12px; color: #00aaff;');
+}, 1000);
+
+function matrixFromModules(mods) {
+    const size = mods.length;
+    return {
+        width: size,
+        height: size,
+        get(x, y) {
+            return Boolean(mods[y] && mods[y][x]);
+        }
+    };
+}
+
+function majorityFilterModules(mods) {
+    const n = mods.length;
+    const out = Array.from({ length: n }, () => Array(n).fill(false));
+    for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+            let dark = 0, total = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    const yy = y + dy;
+                    const xx = x + dx;
+                    if (yy >= 0 && yy < n && xx >= 0 && xx < n) {
+                        total++;
+                        dark += mods[yy][xx] ? 1 : 0;
+                    }
+                }
+            }
+            out[y][x] = dark >= Math.ceil(total / 2);
+        }
+    }
+    for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) mods[y][x] = out[y][x];
+    }
+}
+
+function enforceFunctionPatternsModules(mods) {
+    const n = mods.length;
+    const drawFinder = (ox, oy) => {
+        for (let dy = 0; dy < 7; dy++) {
+            for (let dx = 0; dx < 7; dx++) {
+                const onBorder = dx === 0 || dx === 6 || dy === 0 || dy === 6;
+                const inCenter = dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4;
+                const yy = oy + dy;
+                const xx = ox + dx;
+                if (yy >= 0 && yy < n && xx >= 0 && xx < n) mods[yy][xx] = onBorder || inCenter;
+            }
+        }
+    };
+    drawFinder(0, 0);
+    drawFinder(n - 7, 0);
+    drawFinder(0, n - 7);
+    const inFinder = (x, y) => (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7);
+    for (let x = 0; x < n; x++) if (!inFinder(x, 6)) mods[6][x] = (x % 2) === 0;
+    for (let y = 0; y < n; y++) if (!inFinder(6, y)) mods[y][6] = (y % 2) === 0;
+}
+
+function computeVersionFromDimensionBrowser(dimension) {
+    const provisional = Math.floor((dimension - 17) / 4);
+    return Math.max(1, Math.min(40, provisional));
+}
+
+function buildFunctionMaskBrowser(dimension) {
+    const mask = new Set();
+    const key = (x, y) => y * 2048 + x;
+    const setRegion = (x, y, w, h) => {
+        for (let yy = y; yy < y + h; yy++) {
+            for (let xx = x; xx < x + w; xx++) mask.add(key(xx, yy));
+        }
+    };
+    setRegion(0, 0, 9, 9);
+    setRegion(dimension - 8, 0, 8, 9);
+    setRegion(0, dimension - 8, 9, 8);
+    setRegion(6, 0, 1, dimension);
+    setRegion(0, 6, dimension, 1);
+    mask.add(key(8, dimension - 8));
+    for (let x = 0; x <= 8; x++) if (x !== 6) mask.add(key(x, 8));
+    for (let y = 7; y >= 0; y--) if (y !== 6) mask.add(key(8, y));
+    for (let x = dimension - 1; x >= dimension - 8; x--) mask.add(key(x, 8));
+    for (let y = dimension - 7; y <= dimension - 1; y++) mask.add(key(8, y));
+    const version = computeVersionFromDimensionBrowser(dimension);
+    const centersByVersion = { 2: [6, 18], 3: [6, 22], 4: [6, 26] };
+    const centers = centersByVersion[version];
+    if (centers) {
+        for (const cx of centers) {
+            for (const cy of centers) {
+                if ((cx <= 8 && cy <= 8) || (cx >= dimension - 8 && cy <= 8) || (cx <= 8 && cy >= dimension - 8)) continue;
+                setRegion(cx - 2, cy - 2, 5, 5);
+            }
+        }
+    }
+    return {
+        has(x, y) {
+            return mask.has(key(x, y));
+        }
+    };
+}
+
+function dataMaskPredicateBrowser(maskId) {
+    switch (maskId | 0) {
+        case 0: return (x, y) => ((y + x) % 2) === 0;
+        case 1: return (_x, y) => (y % 2) === 0;
+        case 2: return (x, _y) => (x % 3) === 0;
+        case 3: return (x, y) => ((y + x) % 3) === 0;
+        case 4: return (x, y) => (((Math.floor(y / 2) + Math.floor(x / 3)) % 2) === 0);
+        case 5: return (x, y) => ((((y * x) % 2) + ((y * x) % 3)) === 0);
+        case 6: return (x, y) => (((((y * x) % 2) + ((y * x) % 3)) % 2) === 0);
+        case 7: return (x, y) => (((((y + x) % 2) + ((y * x) % 3)) % 2) === 0);
+        default: return () => false;
+    }
+}
+
+const FORMAT_INFO_TABLE_BROWSER = [
+    { bits: 0b111011111000100, ec: 'L', mask: 0 },
+    { bits: 0b111001011110011, ec: 'L', mask: 1 },
+    { bits: 0b111110110101010, ec: 'L', mask: 2 },
+    { bits: 0b111100010011101, ec: 'L', mask: 3 },
+    { bits: 0b110011000101111, ec: 'L', mask: 4 },
+    { bits: 0b110001100011000, ec: 'L', mask: 5 },
+    { bits: 0b110110001000001, ec: 'L', mask: 6 },
+    { bits: 0b110100101110110, ec: 'L', mask: 7 },
+    { bits: 0b101010000010010, ec: 'M', mask: 0 },
+    { bits: 0b101000100100101, ec: 'M', mask: 1 },
+    { bits: 0b101111001111100, ec: 'M', mask: 2 },
+    { bits: 0b101101101001011, ec: 'M', mask: 3 },
+    { bits: 0b100010111111001, ec: 'M', mask: 4 },
+    { bits: 0b100000011001110, ec: 'M', mask: 5 },
+    { bits: 0b100111110010111, ec: 'M', mask: 6 },
+    { bits: 0b100101010100000, ec: 'M', mask: 7 },
+    { bits: 0b011010101011111, ec: 'Q', mask: 0 },
+    { bits: 0b011000001101000, ec: 'Q', mask: 1 },
+    { bits: 0b011111100110001, ec: 'Q', mask: 2 },
+    { bits: 0b011101000000110, ec: 'Q', mask: 3 },
+    { bits: 0b010010010110100, ec: 'Q', mask: 4 },
+    { bits: 0b010000110000011, ec: 'Q', mask: 5 },
+    { bits: 0b010111011011010, ec: 'Q', mask: 6 },
+    { bits: 0b010101111101101, ec: 'Q', mask: 7 },
+    { bits: 0b001011010001001, ec: 'H', mask: 0 },
+    { bits: 0b001001110111110, ec: 'H', mask: 1 },
+    { bits: 0b001110011100111, ec: 'H', mask: 2 },
+    { bits: 0b001100111010000, ec: 'H', mask: 3 },
+    { bits: 0b000011101100010, ec: 'H', mask: 4 },
+    { bits: 0b000001001010101, ec: 'H', mask: 5 },
+    { bits: 0b000110100001100, ec: 'H', mask: 6 },
+    { bits: 0b000100000111011, ec: 'H', mask: 7 }
+];
+
+function hammingDistance15Browser(a, b) {
+    let v = a ^ b;
+    let d = 0;
+    while (v) {
+        d += v & 1;
+        v >>>= 1;
+    }
+    return d;
+}
+
+function decodeFormatFromBitsBrowser(bits) {
+    let best = null;
+    let bestDist = 16;
+    for (const entry of FORMAT_INFO_TABLE_BROWSER) {
+        const dist = hammingDistance15Browser(bits, entry.bits);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = { ec: entry.ec, mask: entry.mask };
+        }
+        if (dist === 0) break;
+    }
+    return bestDist <= 3 ? best : null;
+}
+
+function readFormatInfoBrowser(matrix) {
+    const dim = matrix.width;
+    let bitsTL = 0;
+    for (let x = 0; x <= 8; x++) if (x !== 6) bitsTL = (bitsTL << 1) | (matrix.get(x, 8) ? 1 : 0);
+    for (let y = 7; y >= 0; y--) if (y !== 6) bitsTL = (bitsTL << 1) | (matrix.get(8, y) ? 1 : 0);
+    const decTL = decodeFormatFromBitsBrowser(bitsTL);
+    if (decTL) return decTL;
+    let bitsTR = 0;
+    for (let x = dim - 1; x >= dim - 8; x--) bitsTR = (bitsTR << 1) | (matrix.get(x, 8) ? 1 : 0);
+    for (let y = dim - 7; y <= dim - 1; y++) bitsTR = (bitsTR << 1) | (matrix.get(8, y) ? 1 : 0);
+    return decodeFormatFromBitsBrowser(bitsTR);
+}
+
+// SPQR-aware codeword reader that handles layered color data
+function readSPQRCodewordsBrowser(rgbaData, width, height, version, dataMaskId, originX, originY, modulePx, modules) {
+    const fnMask = buildFunctionMaskBrowser(modules);
+    const dataMask = dataMaskPredicateBrowser(dataMaskId);
+    const baseCodewords = [];
+    const redCodewords = [];
+    let baseByte = 0, redByte = 0;
+    let baseBits = 0, redBits = 0;
+    let readingUp = true;
+
+    // Color classification for SPQR
+    const isBlackRGB = (r,g,b) => r < 128 && g < 128 && b < 128;
+    const isWhiteRGB = (r,g,b) => r > 200 && g > 200 && b > 200;
+
+    const classifyColor = (r,g,b) => {
+        if (isBlackRGB(r,g,b)) return 'BLACK';
+        if (isWhiteRGB(r,g,b)) return 'WHITE';
+        const redExcess = r - Math.max(g,b);
+        const greenExcess = g - Math.max(r,b);
+        if (redExcess > 35 && r > 120 && g < 220) return 'RED';
+        if (greenExcess > 35 && g > 120 && r < 220) return 'GREEN';
+        return 'WHITE'; // fallback
+    };
+
+    console.log(`readSPQRCodewordsBrowser: ${modules}x${modules}, version=${version}, mask=${dataMaskId}`);
+
+    for (let col = modules - 1; col > 0; col -= 2) {
+        if (col === 6) col--;
+        for (let i = 0; i < modules; i++) {
+            const y = readingUp ? (modules - 1 - i) : i;
+            for (let dx = 0; dx < 2; dx++) {
+                const x = col - dx;
+                if (!fnMask.has(x, y)) {
+                    // Sample color from the image at this module position
+                    const cx = originX + x * modulePx + modulePx / 2;
+                    const cy = originY + y * modulePx + modulePx / 2;
+                    const px = Math.round(cx), py = Math.round(cy);
+                    const idx = (py * width + px) * 4;
+                    const r = rgbaData[idx], g = rgbaData[idx + 1], b = rgbaData[idx + 2];
+                    const color = classifyColor(r, g, b);
+
+                    // Map color to base and red layer bits
+                    // WHITE = base=0, red=0
+                    // RED = base=0, red=1  
+                    // BLACK = base=1, red=0
+                    // GREEN = base=1, red=1
+                    let baseBit = 0, redBit = 0;
+                    if (color === 'BLACK') {
+                        baseBit = 1; redBit = 0;
+                    } else if (color === 'RED') {
+                        baseBit = 0; redBit = 1;
+                    } else if (color === 'GREEN') {
+                        baseBit = 1; redBit = 1;
+                    }
+                    // WHITE = base=0, red=0 (default)
+
+                    // Apply data mask to both layers
+                    if (dataMask(x, y)) {
+                        baseBit = baseBit ? 0 : 1;
+                        redBit = redBit ? 0 : 1;
+                    }
+
+                    // Accumulate bits for base layer
+                    baseByte = (baseByte << 1) | baseBit;
+                    baseBits++;
+                    if (baseBits === 8) {
+                        let reversed = 0;
+                        for (let k = 0; k < 8; k++) reversed = (reversed << 1) | ((baseByte >> k) & 1);
+                        baseCodewords.push(reversed & 0xFF);
+                        baseByte = 0;
+                        baseBits = 0;
+                    }
+
+                    // Accumulate bits for red layer
+                    redByte = (redByte << 1) | redBit;
+                    redBits++;
+                    if (redBits === 8) {
+                        let reversed = 0;
+                        for (let k = 0; k < 8; k++) reversed = (reversed << 1) | ((redByte >> k) & 1);
+                        redCodewords.push(reversed & 0xFF);
+                        redByte = 0;
+                        redBits = 0;
+                    }
+
+                    // Debug: log first few modules
+                    if (baseCodewords.length + redCodewords.length <= 16) {
+                        console.log(`Module (${x},${y}): RGB(${r},${g},${b}) → ${color} → base=${baseBit}, red=${redBit}`);
+                    }
+                }
+            }
+        }
+        readingUp = !readingUp;
+    }
+
+    console.log(`Extracted ${baseCodewords.length} base codewords, ${redCodewords.length} red codewords`);
+
+    // Return both layer codeword streams
+    return { base: baseCodewords, red: redCodewords };
+}
+
+function readCodewordsBrowser(matrix, version, dataMaskId) {
+    const dimension = matrix.height;
+    const fnMask = buildFunctionMaskBrowser(dimension);
+    const dataMask = dataMaskPredicateBrowser(dataMaskId);
+    const codewords = [];
+    let byte = 0;
+    let bits = 0;
+    let readingUp = true;
+
+    // Debug: log matrix structure
+    console.log(`readCodewordsBrowser: dimension=${dimension}, version=${version}, mask=${dataMaskId}`);
+    console.log('Matrix first row:', Array.from({length: Math.min(21, dimension)}, (_, i) => matrix.get(i, 0) ? 1 : 0).join(''));
+    for (let col = dimension - 1; col > 0; col -= 2) {
+        if (col === 6) col--;
+        for (let i = 0; i < dimension; i++) {
+            const y = readingUp ? (dimension - 1 - i) : i;
+            for (let dx = 0; dx < 2; dx++) {
+                const x = col - dx;
+                if (!fnMask.has(x, y)) {
+                    let bit = matrix.get(x, y);
+                    if (dataMask(x, y)) bit = !bit;
+                    // Accumulate bits and reverse per codeword to match core decoder behaviour
+                    byte = (byte << 1) | (bit ? 1 : 0);
+                    bits++;
+                    if (bits === 8) {
+                        let reversed = 0;
+                        for (let k = 0; k < 8; k++) reversed = (reversed << 1) | ((byte >> k) & 1);
+                        codewords.push(reversed & 0xFF);
+                        byte = 0;
+                        bits = 0;
+                        // Debug: log first few codewords
+                        if (codewords.length <= 8) {
+                            console.log(`Codeword ${codewords.length}: 0x${(reversed & 0xFF).toString(16).padStart(2, '0')}`);
+                        }
+                    }
+                }
+            }
+        }
+        readingUp = !readingUp;
+    }
+    return codewords;
+}
+
+function getDataByteCountBrowser(version, ec) {
+    const table = {
+        1: { L: 19, M: 16, Q: 13, H: 9 },
+        2: { L: 34, M: 28, Q: 22, H: 16 },
+        3: { L: 55, M: 44, Q: 34, H: 26 },
+        4: { L: 80, M: 64, Q: 48, H: 36 }
+    };
+    return table[version]?.[ec] ?? null;
+}
+
+const browserTextDecoder = (typeof TextDecoder !== 'undefined') ? new TextDecoder('utf-8') : null;
+
+function decodeByteStreamBrowser(bytes, version) {
+    let byteOffset = 0;
+    let bitOffset = 0;
+    const available = () => 8 * (bytes.length - byteOffset) - bitOffset;
+    const readBits = (n) => {
+        if (n < 1 || n > 32 || n > available()) return -1;
+        let result = 0;
+        let remaining = n;
+        if (bitOffset > 0) {
+            const left = 8 - bitOffset;
+            const take = remaining < left ? remaining : left;
+            const mask = (0xFF >> (8 - take)) << (left - take);
+            result = (bytes[byteOffset] & mask) >> (left - take);
+            remaining -= take;
+            bitOffset += take;
+            if (bitOffset === 8) {
+                bitOffset = 0;
+                byteOffset++;
+            }
+        }
+        while (remaining >= 8) {
+            result = (result << 8) | (bytes[byteOffset] & 0xFF);
+            byteOffset++;
+            remaining -= 8;
+        }
+        if (remaining > 0) {
+            const mask = (0xFF >> (8 - remaining)) << (8 - remaining);
+            result = (result << remaining) | ((bytes[byteOffset] & mask) >> (8 - remaining));
+            bitOffset += remaining;
+        }
+        return result >>> 0;
+    };
+    const sizeIdx = version <= 9 ? 0 : version <= 26 ? 1 : 2;
+    let text = '';
+    while (available() >= 4) {
+        const mode = readBits(4);
+        if (mode === -1 || mode === 0) break;
+        if (mode !== 0x4) {
+            // Try to decode any mode as byte mode
+            const countSize = [8, 16, 16][sizeIdx];
+            let len = readBits(countSize);
+            const maxBytes = Math.floor(available() / 8);
+            if (len < 0 || len > maxBytes) len = maxBytes;
+            const chunk = [];
+            for (let i = 0; i < len && i < 64; i++) {
+                const b = readBits(8);
+                if (b < 0) break;
+                chunk.push(b);
+            }
+            if (chunk.length > 0) {
+                text += String.fromCharCode(...chunk);
+            }
+            break;
+        }
+        const countSize = [8, 16, 16][sizeIdx];
+        const len = readBits(countSize);
+        if (len < 0 || len > 1024) return null;
+        const chunk = [];
+        for (let i = 0; i < len; i++) {
+            const b = readBits(8);
+            if (b < 0) return null;
+            chunk.push(b);
+        }
+        if (browserTextDecoder) {
+            try {
+                text += browserTextDecoder.decode(Uint8Array.from(chunk));
+            } catch (err) {
+                logDebug('UTF-8 decode failed', err);
+                text += String.fromCharCode(...chunk);
+            }
+        } else {
+            text += String.fromCharCode(...chunk);
+        }
+    }
+    return text;
+}
+
+function decodeMatrixGuessMaskBrowser(mods, spqrData = null) {
+    // If we have SPQR data, use the SPQR-aware decoder
+    if (spqrData) {
+        const { rgbaData, width, height, originX, originY, modulePx, modules } = spqrData;
+        return decodeSPQRMatrixGuessMaskBrowser(rgbaData, width, height, originX, originY, modulePx, modules);
+    }
+
+    // Standard QR decoding for non-SPQR matrices
+    const matrix = matrixFromModules(mods);
+    const dimension = matrix.width;
+    const version = computeVersionFromDimensionBrowser(dimension);
+    const makeView = (rot, mirror) => ({
+        width: matrix.width,
+        height: matrix.height,
+        get(x, y) {
+            const d = matrix.width;
+            let xx = x;
+            let yy = y;
+            if (rot === 1) {
+                xx = d - 1 - y;
+                yy = x;
+            } else if (rot === 2) {
+                xx = d - 1 - x;
+                yy = d - 1 - y;
+            } else if (rot === 3) {
+                xx = y;
+                yy = d - 1 - x;
+            }
+            if (mirror) xx = d - 1 - xx;
+            return matrix.get(xx, yy);
+        }
+    });
+    for (let rot = 0; rot < 4; rot++) {
+        for (const mir of [false, true]) {
+            const view = makeView(rot, mir);
+            const fmt = readFormatInfoBrowser(view);
+            if (fmt) {
+                const code = readCodewordsBrowser(view, version, fmt.mask);
+                const dataCount = getDataByteCountBrowser(version, fmt.ec);
+                const payload = dataCount ? code.slice(0, dataCount) : code;
+                const text = decodeByteStreamBrowser(Uint8Array.from(payload), version);
+                if (text) return { text, mask: fmt.mask, version };
+            }
+            // Try all masks and accept first valid text
+            for (let mask = 0; mask < 8; mask++) {
+                const codewords = readCodewordsBrowser(view, version, mask);
+                if (!codewords.length) continue;
+
+                // Debug: log first 16 codewords and mode nibble
+                if (codewords.length >= 4) {
+                    const first16 = Array.from(codewords.slice(0, 16)).map(c => c.toString(16).padStart(2, '0')).join(' ');
+                    const mode = (codewords[0] >> 4) & 0xF;
+                    const length = codewords[1] | ((codewords[0] & 0xF) << 8);
+                    console.log(`Rot ${rot} mir ${mir} mask ${mask}: mode=${mode} len=${length} first16=[${first16}] codewords=${codewords.length}`);
+                }
+
+                const text = decodeByteStreamBrowser(Uint8Array.from(codewords), version);
+                if (text) return { text, mask, version };
+            }
+        }
+    }
+    return null;
+}
+
+// SPQR-aware matrix decoder that extracts and decodes layers directly
+function decodeSPQRMatrixGuessMaskBrowser(rgbaData, width, height, originX, originY, modulePx, modules) {
+    const version = computeVersionFromDimensionBrowser(modules);
+
+    // Try different masks and orientations
+    for (let rot = 0; rot < 4; rot++) {
+        for (const mir of [false, true]) {
+            // Create a view that handles rotation and mirroring
+            const makeView = (rot, mirror) => ({
+                get(x, y) {
+                    const d = modules;
+                    let xx = x;
+                    let yy = y;
+                    if (rot === 1) {
+                        xx = d - 1 - y;
+                        yy = x;
+                    } else if (rot === 2) {
+                        xx = d - 1 - x;
+                        yy = d - 1 - y;
+                    } else if (rot === 3) {
+                        xx = y;
+                        yy = d - 1 - x;
+                    }
+                    if (mirror) xx = d - 1 - xx;
+
+                    // Sample color from the rotated/mirrored position
+                    const cx = originX + xx * modulePx + modulePx / 2;
+                    const cy = originY + yy * modulePx + modulePx / 2;
+                    const px = Math.round(cx), py = Math.round(cy);
+                    const idx = (py * width + px) * 4;
+                    const r = rgbaData[idx], g = rgbaData[idx + 1], b = rgbaData[idx + 2];
+
+                    // Classify color and map to bit (for base layer view)
+                    const isBlackRGB = (r,g,b) => r < 128 && g < 128 && b < 128;
+                    const isWhiteRGB = (r,g,b) => r > 200 && g > 200 && b > 200;
+
+                    if (isBlackRGB(r, g, b)) return 1; // BLACK = dark for base layer
+                    if (isWhiteRGB(r, g, b)) return 0; // WHITE = light for base layer
+
+                    // For RED and GREEN, check if they're "dark" for base layer
+                    // RED: base=0 (light), GREEN: base=1 (dark)
+                    const redExcess = r - Math.max(g, b);
+                    const greenExcess = g - Math.max(r, b);
+
+                    if (greenExcess > 35 && g > 120 && r < 220) return 1; // GREEN = dark for base layer
+                    return 0; // RED/WHITE = light for base layer
+                }
+            });
+
+            const view = makeView(rot, mir);
+            const fmt = readFormatInfoBrowser(view);
+            if (fmt) {
+                const codewords = readSPQRCodewordsBrowser(rgbaData, width, height, version, fmt.mask, originX, originY, modulePx, modules);
+                if (codewords.base.length > 0 || codewords.red.length > 0) {
+                    // Try decoding base layer
+                    if (codewords.base.length > 0) {
+                        const baseText = decodeByteStreamBrowser(Uint8Array.from(codewords.base), version);
+                        if (baseText) {
+                            // Try decoding red layer too
+                            if (codewords.red.length > 0) {
+                                const redText = decodeByteStreamBrowser(Uint8Array.from(codewords.red), version);
+                                if (redText) {
+                                    return { text: baseText + redText, mask: fmt.mask, version, layer: 'combined' };
+                                }
+                            }
+                            return { text: baseText, mask: fmt.mask, version, layer: 'base' };
+                        }
+                    }
+
+                    // Try decoding red layer alone
+                    if (codewords.red.length > 0) {
+                        const redText = decodeByteStreamBrowser(Uint8Array.from(codewords.red), version);
+                        if (redText) {
+                            return { text: redText, mask: fmt.mask, version, layer: 'red' };
+                        }
+                    }
+                }
+            }
+
+            // Try all masks
+            for (let mask = 0; mask < 8; mask++) {
+                const codewords = readSPQRCodewordsBrowser(rgbaData, width, height, version, mask, originX, originY, modulePx, modules);
+                if (codewords.base.length > 0 || codewords.red.length > 0) {
+                    // Try decoding base layer
+                    if (codewords.base.length > 0) {
+                        const baseText = decodeByteStreamBrowser(Uint8Array.from(codewords.base), version);
+                        if (baseText) {
+                            // Try decoding red layer too
+                            if (codewords.red.length > 0) {
+                                const redText = decodeByteStreamBrowser(Uint8Array.from(codewords.red), version);
+                                if (redText) {
+                                    return { text: baseText + redText, mask, version, layer: 'combined' };
+                                }
+                            }
+                            return { text: baseText, mask, version, layer: 'base' };
+                        }
+                    }
+
+                    // Try decoding red layer alone
+                    if (codewords.red.length > 0) {
+                        const redText = decodeByteStreamBrowser(Uint8Array.from(codewords.red), version);
+                        if (redText) {
+                            return { text: redText, mask, version, layer: 'red' };
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}
+
+// Extract bits from SPQR layers for combined decoding
+function extractSPQRBits(baseMods, redMods) {
+    const modules = baseMods.length;
+    const bits = [];
+    let dataModules = 0;
+
+    for (let my = 0; my < modules; my++) {
+        for (let mx = 0; mx < modules; mx++) {
+            // Skip structure areas
+            const isStructure = (mx < 7 && my < 7) || (mx >= modules - 7 && my < 7) || (mx < 7 && my >= modules - 7) ||
+                               (my === 8 && mx <= 8 && mx !== 6) || (mx === 8 && my <= 7 && my !== 6) ||
+                               (my === 8 && mx >= modules - 8) || (mx === 8 && my >= modules - 8 && my !== modules - 1);
+
+            if (!isStructure) {
+                const baseBit = baseMods[my][mx] ? 1 : 0;
+                const redBit = redMods[my][mx] ? 1 : 0;
+                bits.push(baseBit, redBit);
+                dataModules++;
+            }
+        }
+    }
+
+    console.log(`Extracted ${bits.length} bits from ${dataModules} data modules (${modules}x${modules} total)`);
+    return bits;
+}
+
+// Extract color bits directly from SPQR image
+function extractSPQRColorBits(data, width, height, originX, originY, modulePx, modules) {
+    const bits = [];
+    let dataModules = 0;
+
+    // Color classification
+    const isBlackRGB = (r,g,b) => r < 128 && g < 128 && b < 128;
+    const isWhiteRGB = (r,g,b) => r > 200 && g > 200 && b > 200;
+
+    const classifyColor = (r,g,b) => {
+        if (isBlackRGB(r,g,b)) return 'BLACK';
+        if (isWhiteRGB(r,g,b)) return 'WHITE';
+        const redExcess = r - Math.max(g,b);
+        const greenExcess = g - Math.max(r,b);
+        if (redExcess > 35 && r > 120 && g < 220) return 'RED';
+        if (greenExcess > 35 && g > 120 && r < 220) return 'GREEN';
+        return 'WHITE';
+    };
+
+    for (let my = 0; my < modules; my++) {
+        for (let mx = 0; mx < modules; mx++) {
+            // Skip structure areas
+            const isStructure = (mx < 7 && my < 7) || (mx >= modules - 7 && my < 7) || (mx < 7 && my >= modules - 7) ||
+                               (my === 8 && mx <= 8 && mx !== 6) || (mx === 8 && my <= 7 && my !== 6) ||
+                               (my === 8 && mx >= modules - 8) || (mx === 8 && my >= modules - 8 && my !== modules - 1);
+
+            if (!isStructure) {
+                // Sample color directly from image
+                const cx = originX + mx * modulePx + modulePx / 2;
+                const cy = originY + my * modulePx + modulePx / 2;
+                const px = Math.round(cx), py = Math.round(cy);
+                const idx = (py * width + px) * 4;
+                const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+                const color = classifyColor(r, g, b);
+
+                // Map color to bits (4-color SPQR: 2 bits per module)
+                let baseBit = 0, redBit = 0;
+                if (color === 'BLACK') {
+                    baseBit = 1; redBit = 0; // 10
+                } else if (color === 'RED') {
+                    baseBit = 0; redBit = 1; // 01
+                } else if (color === 'GREEN') {
+                    baseBit = 1; redBit = 1; // 11
+                }
+                // WHITE = 00
+
+                bits.push(baseBit, redBit);
+                dataModules++;
+
+                // Debug: log some color mappings
+                if (dataModules <= 10) {
+                    console.log(`SPQR Color Module (${mx},${my}): RGB(${r},${g},${b}) → ${color} → bits=${(baseBit << 1) | redBit}`);
+                }
+            }
+        }
+    }
+
+    console.log(`SPQR: Extracted ${bits.length} bits from ${dataModules} color modules`);
+    return bits;
+}
+
+// Decode SPQR bits as a single data stream
+function decodeSPQRBits(bits) {
+    if (bits.length < 16) return null; // Need at least some data
+
+    console.log(`SPQR: Decoding ${bits.length} bits as layered QR data`);
+
+    // For 4-color SPQR, we need to reconstruct the original QR code layers
+    // The color bits represent encoded modules, not raw QR code data
+    // We need to decode this as the encoded representation of multiple QR codes
+
+    const totalBits = bits.length;
+    const modules = totalBits / 2; // 2 bits per module in 4-color mode
+    console.log(`SPQR: ${modules} modules, ${totalBits} total bits`);
+
+    // Reconstruct the base and red layer QR codes from the color encoding
+    const baseQR = reconstructQRLayer(bits, 'base');
+    const redQR = reconstructQRLayer(bits, 'red');
+
+    console.log(`SPQR: Base QR bytes (${baseQR.length}): [${baseQR.slice(0, 8).map(b => '0x' + b.toString(16)).join(', ')}]`);
+    console.log(`SPQR: Red QR bytes (${redQR.length}): [${redQR.slice(0, 8).map(b => '0x' + redQR[0].toString(16)).join(', ')}]`);
+
+    // Decode each reconstructed QR code
+    const baseText = decodeQRBytes(baseQR);
+    const redText = decodeQRBytes(redQR);
+
+    console.log(`SPQR: Base layer decoded: "${baseText}"`);
+    console.log(`SPQR: Red layer decoded: "${redText}"`);
+
+    // Combine the results
+    if (baseText && redText) {
+        return baseText + redText;
+    } else if (baseText) {
+        return baseText;
+    } else if (redText) {
+        return redText;
+    }
+
+    return null;
+}
+
+// Reconstruct a QR code layer from color bits
+function reconstructQRLayer(bits, layer) {
+    const baseOffset = layer === 'base' ? 0 : 1;
+    const layerBits = [];
+
+    // Extract the appropriate bit from each color pair
+    for (let i = 0; i < bits.length; i += 2) {
+        layerBits.push(bits[i + baseOffset]);
+    }
+
+    // Convert bits to bytes
+    return bitsToBytes(layerBits);
+}
+
+// Helper function to convert bits to bytes (LSB first)
+function bitsToBytes(bits) {
+    const bytes = [];
+    for (let i = 0; i < bits.length; i += 8) {
+        let byte = 0;
+        for (let j = 0; j < 8 && i + j < bits.length; j++) {
+            byte = (byte << 1) | bits[i + j];
+        }
+        bytes.push(byte);
+    }
+    return bytes;
+    }
+
+// Decode QR code bytes (assumes byte mode)
+function decodeQRBytes(bytes) {
+    if (bytes.length < 4) return null;
+
+    // The first byte should be the mode + length header for byte mode
+    // We need to reconstruct this since the color encoding strips it
+    const dataBytes = bytes;
+
+    // Estimate the data length (this is a heuristic)
+    // For small QR codes, the data is usually most of the bytes
+    const estimatedLength = Math.max(1, Math.min(dataBytes.length - 2, 64));
+
+    // Create a proper QR byte stream with reconstructed header
+    // Mode = 4 (byte mode), length high bits
+    const lengthHigh = (estimatedLength >> 8) & 0xF;
+    const reconstructedFirstByte = (4 << 4) | lengthHigh; // 0x4X
+    const reconstructedSecondByte = estimatedLength & 0xFF;
+
+    const reconstructedBytes = [reconstructedFirstByte, reconstructedSecondByte, ...dataBytes.slice(0, estimatedLength)];
+
+    console.log(`  QR decode: reconstructed header 0x${reconstructedFirstByte.toString(16)},${reconstructedSecondByte.toString(16)}, estimated length=${estimatedLength}`);
+
+    // Extract the actual data
+    const dataLength = estimatedLength;
+    const finalDataBytes = reconstructedBytes.slice(2, 2 + dataLength);
+
+    try {
+        const text = new TextDecoder('utf-8').decode(new Uint8Array(finalDataBytes));
+        console.log(`  QR decode: extracted "${text}"`);
+        return text;
+    } catch (e) {
+        console.log('  QR decode: UTF-8 decode failed:', e.message);
+        return null;
+    }
+}
+
+// Detect if an image contains SPQR color patterns
+function detectSPQRPattern(data, width, height) {
+    const isBlackRGB = (r,g,b) => r < 128 && g < 128 && b < 128;
+    const isWhiteRGB = (r,g,b) => r > 200 && g > 200 && b > 200;
+
+    const classifyColor = (r,g,b) => {
+        if (isBlackRGB(r,g,b)) return 'BLACK';
+        if (isWhiteRGB(r,g,b)) return 'WHITE';
+        const redExcess = r - Math.max(g,b);
+        const greenExcess = g - Math.max(r,b);
+        if (redExcess > 35 && r > 120 && g < 220) return 'RED';
+        if (greenExcess > 35 && g > 120 && r < 220) return 'GREEN';
+        return 'WHITE'; // fallback
+    };
+
+    // Sample a grid of points to detect color patterns
+    const sampleSize = Math.min(50, Math.min(width, height)); // Sample up to 50x50 grid
+    const stepX = Math.floor(width / sampleSize);
+    const stepY = Math.floor(height / sampleSize);
+
+    const colors = { WHITE: 0, RED: 0, GREEN: 0, BLACK: 0 };
+
+    for (let y = stepY; y < height - stepY; y += stepY) {
+        for (let x = stepX; x < width - stepX; x += stepX) {
+            const idx = (y * width + x) * 4;
+            const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+            const color = classifyColor(r, g, b);
+            colors[color] = (colors[color] || 0) + 1;
+        }
+    }
+
+    // Check if we have significant color diversity (SPQR should have multiple colors)
+    const totalSamples = Object.values(colors).reduce((a, b) => a + b, 0);
+    const colorCount = Object.values(colors).filter(count => count > totalSamples * 0.05).length;
+
+    console.log('SPQR detection: colors found:', colors, 'diversity:', colorCount);
+
+    // SPQR should have at least 3 different colors with significant presence
+    return colorCount >= 3;
+}
+
+// Extract color bits directly from SPQR image for direct decoding
+function extractSPQRColorBits(data, width, height, originX, originY, modulePx, modules) {
+    const bits = [];
+    let dataModules = 0;
+
+    // Color classification for SPQR
+    const isBlackRGB = (r,g,b) => r < 128 && g < 128 && b < 128;
+    const isWhiteRGB = (r,g,b) => r > 200 && g > 200 && b > 200;
+
+    const classifyColor = (r,g,b) => {
+        if (isBlackRGB(r,g,b)) return 'BLACK';
+        if (isWhiteRGB(r,g,b)) return 'WHITE';
+        const redExcess = r - Math.max(g,b);
+        const greenExcess = g - Math.max(r,b);
+        if (redExcess > 35 && r > 120 && g < 220) return 'RED';
+        if (greenExcess > 35 && g > 120 && r < 220) return 'GREEN';
+        return 'WHITE'; // fallback
+    };
+
+    for (let my = 0; my < modules; my++) {
+        for (let mx = 0; mx < modules; mx++) {
+            // Skip structure areas
+            const isStructure = (mx < 7 && my < 7) || (mx >= modules - 7 && my < 7) || (mx < 7 && my >= modules - 7) ||
+                               (my === 8 && mx <= 8 && mx !== 6) || (mx === 8 && my <= 7 && my !== 6) ||
+                               (my === 8 && mx >= modules - 8) || (mx === 8 && my >= modules - 8 && my !== modules - 1);
+
+            if (!isStructure) {
+                // Sample color directly from image
+                const cx = originX + mx * modulePx + modulePx / 2;
+                const cy = originY + my * modulePx + modulePx / 2;
+                const px = Math.round(cx), py = Math.round(cy);
+                const idx = (py * width + px) * 4;
+                const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+                const color = classifyColor(r, g, b);
+
+                // Map color to bits (4-color SPQR: 2 bits per module)
+                let baseBit = 0, redBit = 0;
+                if (color === 'BLACK') {
+                    baseBit = 1; redBit = 0; // 10
+                } else if (color === 'RED') {
+                    baseBit = 0; redBit = 1; // 01
+                } else if (color === 'GREEN') {
+                    baseBit = 1; redBit = 1; // 11
+                }
+                // WHITE = 00
+
+                bits.push(baseBit, redBit);
+                dataModules++;
+
+                // Debug: log some color mappings
+                if (dataModules <= 10) {
+                    console.log(`SPQR Color Module (${mx},${my}): RGB(${r},${g},${b}) → ${color} → bits=${(baseBit << 1) | redBit}`);
+                }
+            }
+        }
+    }
+
+    console.log(`SPQR: Extracted ${bits.length} bits from ${dataModules} color modules`);
+    return bits;
+}

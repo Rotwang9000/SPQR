@@ -1,0 +1,8 @@
+{
+  "base_only_M": 4000,
+  "base_only_L": 4000,
+  "two_layers_split_M": 4000,
+  "two_layers_split_L": 2920,
+  "three_layers_split_M": 4000,
+  "three_layers_split_L": 4000
+}
