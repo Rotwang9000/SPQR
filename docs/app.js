@@ -1305,58 +1305,88 @@ function detectSPQR(imageData) {
     
     console.log(`SPQR detection starting: ${width}x${height} image`);
     
-    // First, detect if this has color patterns and which type
-    let redPixels = 0, greenPixels = 0, bluePixels = 0;
-    let cyanPixels = 0, magentaPixels = 0, yellowPixels = 0;
-    let blackPixels = 0, whitePixels = 0;
+    // First, detect if this has color patterns and count colored pixels
+    let coloredPixels = 0;
     let totalPixels = 0;
     
-    // Sample every 4th pixel to check for colors
-    for (let i = 0; i < data.length; i += 16) { // 16 = 4 pixels * 4 bytes per pixel
+    // Quick scan to check if there are colors
+    for (let i = 0; i < data.length; i += 16) { // Sample every 4th pixel
         const r = data[i];
         const g = data[i + 1];
         const b = data[i + 2];
         
         totalPixels++;
         
-        // Classify pixels (more lenient thresholds for custom colors)
-        if (r < 50 && g < 50 && b < 50) {
-            blackPixels++;
-        } else if (r > 200 && g > 200 && b > 200) {
-            whitePixels++;
-        } else if (r > 150 && g < 80 && b < 80) {
-            redPixels++; // Red dominant (allows #cc0000)
-        } else if (r < 80 && g > 150 && b < 80) {
-            greenPixels++; // Green dominant (allows #00aa00)
-        } else if (r < 80 && g < 80 && b > 150) {
-            bluePixels++; // Blue dominant
-        } else if (r < 80 && g > 150 && b > 150) {
-            cyanPixels++; // Cyan = green + blue
-        } else if (r > 150 && g < 80 && b > 150) {
-            magentaPixels++; // Magenta = red + blue
-        } else if (r > 150 && g > 150 && b < 80) {
-            yellowPixels++; // Yellow = red + green
+        // Check if not black or white
+        const isBlack = r < 50 && g < 50 && b < 50;
+        const isWhite = r > 200 && g > 200 && b > 200;
+        if (!isBlack && !isWhite) {
+            coloredPixels++;
         }
     }
     
-    const bwrgColors = redPixels + greenPixels;
-    const cmyrgbColors = cyanPixels + magentaPixels + yellowPixels + bluePixels;
-    const colorPercentage = (bwrgColors + cmyrgbColors) / totalPixels;
+    const colorPercentage = coloredPixels / totalPixels;
+    console.log(`  Color ratio: ${colorPercentage.toFixed(3)} (${coloredPixels} colored pixels)`);
     
-    console.log(`SPQR pixel analysis: ${blackPixels} black, ${whitePixels} white`);
-    console.log(`  BWRG: ${redPixels} red, ${greenPixels} green`);
-    console.log(`  CMYRGB: ${cyanPixels} cyan, ${magentaPixels} magenta, ${yellowPixels} yellow, ${bluePixels} blue`);
-    console.log(`  Color ratio: ${colorPercentage.toFixed(3)}`);
-    
-    // If we have significant color content, try to decode SPQR
-    if (colorPercentage > 0.01) { // More than 1% coloured pixels
-        // Determine which type based on color distribution
-        if (cmyrgbColors > bwrgColors) {
-            console.log('CMYRGB (8-color) SPQR detected, attempting decode...');
+    // If we have significant color content, determine BWRG vs CMYRGB by checking finder patterns
+    if (colorPercentage > 0.01) { // More than 1% colored pixels
+        // BWRG has SOLID colors in finder centers (3x3 module area)
+        // CMYRGB has 2x2 GRID of colors in finder centers
+        // Sample the top-left finder center to check
+        
+        // Estimate grid parameters
+        const margin = 4; // Standard margin
+        let modulePx = 5; // Default guess
+        let modules = 21; // Default guess
+        
+        // Try to detect actual grid
+        for (let testModules = 21; testModules <= 177; testModules += 4) {
+            const testModulePx = width / (testModules + 2 * margin);
+            const remainder = Math.abs(testModulePx - Math.round(testModulePx));
+            if (remainder < 0.1) {
+                modules = testModules;
+                modulePx = Math.round(testModulePx);
+                break;
+            }
+        }
+        
+        console.log(`  Estimated grid: ${modules}×${modules}, ${modulePx}px/module`);
+        
+        // Sample the TL finder center (grid position 3,3 to 5,5)
+        // Check if it has multiple distinct colors (CMYRGB) or solid color (BWRG)
+        const finderCenterX = Math.round((margin + 3.5) * modulePx);
+        const finderCenterY = Math.round((margin + 3.5) * modulePx);
+        const sampleRadius = Math.floor(modulePx * 1.5); // Sample ~3 modules
+        
+        const colors = new Set();
+        const colorThreshold = 60; // Colors must differ by at least this much
+        
+        for (let dy = -sampleRadius; dy <= sampleRadius; dy += Math.max(1, Math.floor(modulePx / 3))) {
+            for (let dx = -sampleRadius; dx <= sampleRadius; dx += Math.max(1, Math.floor(modulePx / 3))) {
+                const px = Math.max(0, Math.min(width - 1, finderCenterX + dx));
+                const py = Math.max(0, Math.min(height - 1, finderCenterY + dy));
+                const idx = (py * width + px) * 4;
+                const r = data[idx];
+                const g = data[idx + 1];
+                const b = data[idx + 2];
+                
+                // Quantize color to reduce noise
+                const colorKey = `${Math.floor(r / colorThreshold)},${Math.floor(g / colorThreshold)},${Math.floor(b / colorThreshold)}`;
+                colors.add(colorKey);
+            }
+        }
+        
+        const uniqueColors = colors.size;
+        console.log(`  Finder center has ${uniqueColors} distinct colors`);
+        
+        // CMYRGB has 2x2 grid with 4 colors in TL finder
+        // BWRG has solid color (1-2 colors due to sampling noise)
+        if (uniqueColors >= 3) {
+            console.log('CMYRGB (8-color, 3-layer) SPQR detected');
             return decodeCMYRGBLayers(imageData);
         } else {
-            console.log('BWRG (4-color) SPQR detected, attempting decode...');
-        return decodeSPQRLayers(imageData);
+            console.log('BWRG (4-color, 2-layer) SPQR detected');
+            return decodeSPQRLayers(imageData);
         }
     }
     
