@@ -159,10 +159,10 @@ async function generateSpqrClient(text, options) {
 	const modules = baseQr.getModuleCount();
 	const margin = 4;
 
-	const bitsPerModule = isEightColour ? 3 : 2;
-	const basePx = 4;
-	const adjustedPx = Math.max(basePx, Math.floor(basePx * Math.sqrt(bitsPerModule)));
-	const cell = adjustedPx;
+	// Use fixed module sizes for reliable decoding
+	// BWRG (2-layer): 5px per module
+	// CMYRGB (3-layer): 6px per module
+	const cell = isEightColour ? 6 : 5;
 	const totalModules = modules + 2 * margin;
 	const width = totalModules * cell;
 	const height = width;
@@ -1370,9 +1370,14 @@ function detectSPQR(imageData) {
         
         if (candidates.length > 0) {
             candidates.sort((a, b) => {
-                if (Math.abs(a.remainder - b.remainder) < 0.05) {
-                    return a.modules - b.modules;
-                }
+                // Prioritise standard module sizes (5px for BWRG, 6px for CMYRGB)
+                const aIsStandard = (a.modulePx === 5 || a.modulePx === 6);
+                const bIsStandard = (b.modulePx === 5 || b.modulePx === 6);
+                
+                if (aIsStandard && !bIsStandard) return -1;
+                if (!aIsStandard && bIsStandard) return 1;
+                
+                // If both are standard, prefer exact fit (remainder=0) or smaller remainder
                 return a.remainder - b.remainder;
             });
             modules = candidates[0].modules;
@@ -2539,12 +2544,16 @@ function decodeSPQRLayers(imageData) {
 	let modulePx = Math.round(bestModulePx);
 	
 	if (candidates.length > 0) {
-		// Sort by remainder (best fit first), then by modules (smallest first)
+		// Sort with priority: standard module sizes (5px BWRG, 6px CMYRGB), then best fit
 		candidates.sort((a, b) => {
-			if (Math.abs(a.remainder - b.remainder) < 0.05) {
-				return a.modules - b.modules; // Prefer smaller
-			}
-			return a.remainder - b.remainder; // Prefer better fit
+			const aIsStandard = (a.roundedPx === 5 || a.roundedPx === 6);
+			const bIsStandard = (b.roundedPx === 5 || b.roundedPx === 6);
+			
+			if (aIsStandard && !bIsStandard) return -1;
+			if (!aIsStandard && bIsStandard) return 1;
+			
+			// If both are standard, prefer exact fit (remainder=0) or smaller remainder
+			return a.remainder - b.remainder;
 		});
 		
 		modules = candidates[0].modules;
@@ -2849,12 +2858,16 @@ function decodeCMYRGBLayers(imageData) {
 	let modulePx = Math.round(bestModulePx);
 	
 	if (candidates.length > 0) {
-		// Sort by remainder (best fit first), then by modules (smallest first)
+		// Sort with priority: standard module sizes (5px BWRG, 6px CMYRGB), then best fit
 		candidates.sort((a, b) => {
-			if (Math.abs(a.remainder - b.remainder) < 0.05) {
-				return a.modules - b.modules; // Prefer smaller
-			}
-			return a.remainder - b.remainder; // Prefer better fit
+			const aIsStandard = (a.roundedPx === 5 || a.roundedPx === 6);
+			const bIsStandard = (b.roundedPx === 5 || b.roundedPx === 6);
+			
+			if (aIsStandard && !bIsStandard) return -1;
+			if (!aIsStandard && bIsStandard) return 1;
+			
+			// If both are standard, prefer exact fit (remainder=0) or smaller remainder
+			return a.remainder - b.remainder;
 		});
 		
 		modules = candidates[0].modules;
