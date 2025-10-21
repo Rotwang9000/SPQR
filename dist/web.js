@@ -5,12 +5,15 @@
  */
 import { createServer } from 'http';
 import { readFile } from 'fs/promises';
-import { join, extname } from 'path';
+import { join, extname, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { generateColourQr } from './generator.js';
 import sharp from 'sharp';
 import QRCode from 'qrcode';
 const PORT = process.env.PORT || 3017;
-const STATIC_DIR = 'web';
+// Resolve docs directory relative to project root (parent of dist/)
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const STATIC_DIR = join(__dirname, '..', 'docs');
 // MIME types for static files
 const MIME_TYPES = {
     '.html': 'text/html',
@@ -23,14 +26,16 @@ const MIME_TYPES = {
     '.json': 'application/json'
 };
 async function serveStatic(path) {
+    const filePath = join(STATIC_DIR, path === '/' ? 'index.html' : path);
     try {
-        const filePath = join(STATIC_DIR, path === '/' ? 'index.html' : path);
+        console.log(`Serving: ${path} -> ${filePath}`);
         const content = await readFile(filePath);
         const ext = extname(filePath);
         const contentType = MIME_TYPES[ext] || 'application/octet-stream';
         return { content, contentType };
     }
-    catch {
+    catch (err) {
+        console.error(`Failed to serve ${filePath}:`, err.message);
         return null;
     }
 }

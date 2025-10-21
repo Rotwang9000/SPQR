@@ -1336,48 +1336,97 @@ function detectSPQR(imageData) {
         
         // Estimate grid parameters
         const margin = 4; // Standard margin
-        let modulePx = 5; // Default guess
-        let modules = 21; // Default guess
         
-        // Try to detect actual grid
+        // Find best grid match
+        let bestModules = 21;
+        let bestModulePx = width / (21 + 2 * margin);
+        let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
+        const candidates = [];
+        
         for (let testModules = 21; testModules <= 177; testModules += 4) {
             const testModulePx = width / (testModules + 2 * margin);
-            const remainder = Math.abs(testModulePx - Math.round(testModulePx));
-            if (remainder < 0.1) {
-                modules = testModules;
-                modulePx = Math.round(testModulePx);
-                break;
+            const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
+            const roundedModulePx = Math.round(testModulePx);
+            
+            if (roundedModulePx < 2) continue;
+            
+            if (testRemainder < 0.2) {
+                candidates.push({
+                    modules: testModules,
+                    modulePx: roundedModulePx,
+                    remainder: testRemainder
+                });
             }
+            
+            if (testRemainder < bestRemainder) {
+                bestRemainder = testRemainder;
+                bestModulePx = testModulePx;
+                bestModules = testModules;
+            }
+        }
+        
+        let modules = bestModules;
+        let modulePx = Math.round(bestModulePx);
+        
+        if (candidates.length > 0) {
+            candidates.sort((a, b) => {
+                if (Math.abs(a.remainder - b.remainder) < 0.05) {
+                    return a.modules - b.modules;
+                }
+                return a.remainder - b.remainder;
+            });
+            modules = candidates[0].modules;
+            modulePx = candidates[0].modulePx;
         }
         
         console.log(`  Estimated grid: ${modules}×${modules}, ${modulePx}px/module`);
         
-        // Sample the TL finder center (grid position 3,3 to 5,5)
-        // Check if it has multiple distinct colors (CMYRGB) or solid color (BWRG)
-        const finderCenterX = Math.round((margin + 3.5) * modulePx);
-        const finderCenterY = Math.round((margin + 3.5) * modulePx);
-        const sampleRadius = Math.floor(modulePx * 1.5); // Sample ~3 modules
+        // Sample the TL finder center (the 3×3 inner square of the finder)
+        // BWRG: solid color in all 9 modules
+        // CMYRGB: 2×2 grid with 4 different colors in the center 4 modules
+        // Sample from the CENTER of each of the 9 inner modules (grid positions 2-4, 2-4)
+        const colorSamples = [];
         
-        const colors = new Set();
-        const colorThreshold = 60; // Colors must differ by at least this much
-        
-        for (let dy = -sampleRadius; dy <= sampleRadius; dy += Math.max(1, Math.floor(modulePx / 3))) {
-            for (let dx = -sampleRadius; dx <= sampleRadius; dx += Math.max(1, Math.floor(modulePx / 3))) {
-                const px = Math.max(0, Math.min(width - 1, finderCenterX + dx));
-                const py = Math.max(0, Math.min(height - 1, finderCenterY + dy));
-                const idx = (py * width + px) * 4;
-                const r = data[idx];
-                const g = data[idx + 1];
-                const b = data[idx + 2];
+        for (let my = 2; my <= 4; my++) {
+            for (let mx = 2; mx <= 4; mx++) {
+                // Calculate pixel position at the CENTER of this module
+                const px = Math.round((margin + mx + 0.5) * modulePx);
+                const py = Math.round((margin + my + 0.5) * modulePx);
                 
-                // Quantize color to reduce noise
-                const colorKey = `${Math.floor(r / colorThreshold)},${Math.floor(g / colorThreshold)},${Math.floor(b / colorThreshold)}`;
-                colors.add(colorKey);
+                if (px >= 0 && px < width && py >= 0 && py < height) {
+                    const idx = (py * width + px) * 4;
+                    const r = data[idx];
+                    const g = data[idx + 1];
+                    const b = data[idx + 2];
+                    colorSamples.push({ r, g, b });
+                }
             }
         }
         
-        const uniqueColors = colors.size;
-        console.log(`  Finder center has ${uniqueColors} distinct colors`);
+        // Cluster similar colors
+        const colorThreshold = 80; // Colors within this distance are considered the same
+        const clusters = [];
+        
+        for (const sample of colorSamples) {
+            let foundCluster = false;
+            for (const cluster of clusters) {
+                const dist = Math.sqrt(
+                    Math.pow(sample.r - cluster.r, 2) +
+                    Math.pow(sample.g - cluster.g, 2) +
+                    Math.pow(sample.b - cluster.b, 2)
+                );
+                if (dist < colorThreshold) {
+                    foundCluster = true;
+                    break;
+                }
+            }
+            if (!foundCluster) {
+                clusters.push(sample);
+            }
+        }
+        
+        const uniqueColors = clusters.length;
+        console.log(`  Finder center has ${uniqueColors} distinct colors (from ${colorSamples.length} samples)`);
         
         // CMYRGB has 2x2 grid with 4 colors in TL finder
         // BWRG has solid color (1-2 colors due to sampling noise)
@@ -2445,41 +2494,62 @@ function decodeSPQRLayers(imageData) {
 			
 			return bestColor;
 		};
-		
+	
 	// Step 2: Detect grid structure from image dimensions
 	// SPQR images have: margin (4 modules) + QR data + margin (4 modules)
-	// Generator creates BWRG with 5px/module
-        const margin = 4;
-	const expectedPxPerModule = 5; // BWRG codes use 5px per module
+	const margin = 4;
 	
-	// Find the best match by checking all common QR sizes
 	let bestModules = 21;
 	let bestModulePx = width / (21 + 2 * margin);
 	let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
-	let bestScore = Math.abs(Math.round(bestModulePx) - expectedPxPerModule);
 	
-	// QR codes range from Version 1 (21×21) to Version 40 (177×177), incrementing by 4
+	// Search through valid QR versions (21, 25, 29, ... 177 modules)
+	// Collect all candidates with very good fit (remainder < 0.2)
+	const candidates = [];
+	
 	for (let testModules = 21; testModules <= 177; testModules += 4) {
 		const testModulePx = width / (testModules + 2 * margin);
 		const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
 		const roundedModulePx = Math.round(testModulePx);
-		const distanceFromExpected = Math.abs(roundedModulePx - expectedPxPerModule);
 		
 		// Skip if pixels per module would be too small (< 2px)
 		if (roundedModulePx < 2) continue;
 		
-		// Prefer: 1) Better remainder, 2) Closer to expected px/module
-		if (testRemainder < bestRemainder || 
-		    (testRemainder === bestRemainder && distanceFromExpected < bestScore)) {
+		// Collect candidates with good fit
+		if (testRemainder < 0.2) {
+			candidates.push({
+				modules: testModules,
+				modulePx: testModulePx,
+				remainder: testRemainder,
+				roundedPx: roundedModulePx
+			});
+		}
+		
+		// Also track overall best
+		if (testRemainder < bestRemainder) {
 			bestRemainder = testRemainder;
 			bestModulePx = testModulePx;
 			bestModules = testModules;
-			bestScore = distanceFromExpected;
 		}
 	}
 	
-	const modules = bestModules;
-	const modulePx = Math.round(bestModulePx);
+	// If we have multiple good candidates, prefer smaller module counts
+	// (QR codes use the smallest version that fits the data)
+	let modules = bestModules;
+	let modulePx = Math.round(bestModulePx);
+	
+	if (candidates.length > 0) {
+		// Sort by remainder (best fit first), then by modules (smallest first)
+		candidates.sort((a, b) => {
+			if (Math.abs(a.remainder - b.remainder) < 0.05) {
+				return a.modules - b.modules; // Prefer smaller
+			}
+			return a.remainder - b.remainder; // Prefer better fit
+		});
+		
+		modules = candidates[0].modules;
+		modulePx = candidates[0].roundedPx;
+	}
 	
 	console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module (remainder: ${bestRemainder.toFixed(3)})`);
 		
@@ -2734,38 +2804,62 @@ function decodeCMYRGBLayers(imageData) {
 			
 			return bestColor;
 		};
+	
+	// Step 2: Detect grid structure
+	// Try to find the QR grid that best fits the image dimensions
+	const margin = 4;
+	
+	let bestModules = 21;
+	let bestModulePx = width / (21 + 2 * margin);
+	let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
+	
+	// Search through valid QR versions (21, 25, 29, ... 177 modules)
+	// Collect all candidates with very good fit (remainder < 0.2)
+	const candidates = [];
+	
+	for (let testModules = 21; testModules <= 177; testModules += 4) {
+		const testModulePx = width / (testModules + 2 * margin);
+		const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
+		const roundedModulePx = Math.round(testModulePx);
 		
-		// Step 2: Detect grid structure
-		// Generator creates CMYRGB with 6px/module
-		const margin = 4;
-		const expectedPxPerModule = 6; // CMYRGB codes use 6px per module
+		// Skip if pixels per module would be too small (< 2px)
+		if (roundedModulePx < 2) continue;
 		
-		let bestModules = 21;
-		let bestModulePx = width / (21 + 2 * margin);
-		let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
-		let bestScore = Math.abs(Math.round(bestModulePx) - expectedPxPerModule);
-		
-		for (let testModules = 21; testModules <= 177; testModules += 4) {
-			const testModulePx = width / (testModules + 2 * margin);
-			const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
-			const roundedModulePx = Math.round(testModulePx);
-			const distanceFromExpected = Math.abs(roundedModulePx - expectedPxPerModule);
-			
-			// Skip if pixels per module would be too small (< 2px)
-			if (roundedModulePx < 2) continue;
-			
-			// Prefer: 1) Better remainder, 2) Closer to expected px/module (6px)
-			if (testRemainder < bestRemainder || 
-			    (testRemainder === bestRemainder && distanceFromExpected < bestScore)) {
-				bestRemainder = testRemainder;
-				bestModulePx = testModulePx;
-				bestModules = testModules;
-				bestScore = distanceFromExpected;
-			}
+		// Collect candidates with good fit
+		if (testRemainder < 0.2) {
+			candidates.push({
+				modules: testModules,
+				modulePx: testModulePx,
+				remainder: testRemainder,
+				roundedPx: roundedModulePx
+			});
 		}
 		
-		const modules = bestModules;
-		const modulePx = Math.round(bestModulePx);
+		// Also track overall best
+		if (testRemainder < bestRemainder) {
+			bestRemainder = testRemainder;
+			bestModulePx = testModulePx;
+			bestModules = testModules;
+		}
+	}
+	
+	// If we have multiple good candidates, prefer smaller module counts
+	// (QR codes use the smallest version that fits the data)
+	let modules = bestModules;
+	let modulePx = Math.round(bestModulePx);
+	
+	if (candidates.length > 0) {
+		// Sort by remainder (best fit first), then by modules (smallest first)
+		candidates.sort((a, b) => {
+			if (Math.abs(a.remainder - b.remainder) < 0.05) {
+				return a.modules - b.modules; // Prefer smaller
+			}
+			return a.remainder - b.remainder; // Prefer better fit
+		});
+		
+		modules = candidates[0].modules;
+		modulePx = candidates[0].roundedPx;
+	}
 		
 		console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module`);
 		
@@ -3248,596 +3342,6 @@ setTimeout(() => {
 	console.log('%cRun testSPQRRoundTrip() in console to test encoding/decoding', 'font-size: 12px; color: #00aaff;');
 }, 1000);
 
-function matrixFromModules(mods) {
-    const size = mods.length;
-    return {
-        width: size,
-        height: size,
-        get(x, y) {
-            return Boolean(mods[y] && mods[y][x]);
-        }
-    };
-}
-
-function majorityFilterModules(mods) {
-    const n = mods.length;
-    const out = Array.from({ length: n }, () => Array(n).fill(false));
-    for (let y = 0; y < n; y++) {
-        for (let x = 0; x < n; x++) {
-            let dark = 0, total = 0;
-            for (let dy = -1; dy <= 1; dy++) {
-                for (let dx = -1; dx <= 1; dx++) {
-                    const yy = y + dy;
-                    const xx = x + dx;
-                    if (yy >= 0 && yy < n && xx >= 0 && xx < n) {
-                        total++;
-                        dark += mods[yy][xx] ? 1 : 0;
-                    }
-                }
-            }
-            out[y][x] = dark >= Math.ceil(total / 2);
-        }
-    }
-    for (let y = 0; y < n; y++) {
-        for (let x = 0; x < n; x++) mods[y][x] = out[y][x];
-    }
-}
-
-function enforceFunctionPatternsModules(mods) {
-    const n = mods.length;
-    const drawFinder = (ox, oy) => {
-        for (let dy = 0; dy < 7; dy++) {
-            for (let dx = 0; dx < 7; dx++) {
-                const onBorder = dx === 0 || dx === 6 || dy === 0 || dy === 6;
-                const inCenter = dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4;
-                const yy = oy + dy;
-                const xx = ox + dx;
-                if (yy >= 0 && yy < n && xx >= 0 && xx < n) mods[yy][xx] = onBorder || inCenter;
-            }
-        }
-    };
-    drawFinder(0, 0);
-    drawFinder(n - 7, 0);
-    drawFinder(0, n - 7);
-    const inFinder = (x, y) => (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7);
-    for (let x = 0; x < n; x++) if (!inFinder(x, 6)) mods[6][x] = (x % 2) === 0;
-    for (let y = 0; y < n; y++) if (!inFinder(6, y)) mods[y][6] = (y % 2) === 0;
-}
-
-function computeVersionFromDimensionBrowser(dimension) {
-    const provisional = Math.floor((dimension - 17) / 4);
-    return Math.max(1, Math.min(40, provisional));
-}
-
-function buildFunctionMaskBrowser(dimension) {
-    const mask = new Set();
-    const key = (x, y) => y * 2048 + x;
-    const setRegion = (x, y, w, h) => {
-        for (let yy = y; yy < y + h; yy++) {
-            for (let xx = x; xx < x + w; xx++) mask.add(key(xx, yy));
-        }
-    };
-    setRegion(0, 0, 9, 9);
-    setRegion(dimension - 8, 0, 8, 9);
-    setRegion(0, dimension - 8, 9, 8);
-    setRegion(6, 0, 1, dimension);
-    setRegion(0, 6, dimension, 1);
-    mask.add(key(8, dimension - 8));
-    for (let x = 0; x <= 8; x++) if (x !== 6) mask.add(key(x, 8));
-    for (let y = 7; y >= 0; y--) if (y !== 6) mask.add(key(8, y));
-    for (let x = dimension - 1; x >= dimension - 8; x--) mask.add(key(x, 8));
-    for (let y = dimension - 7; y <= dimension - 1; y++) mask.add(key(8, y));
-    const version = computeVersionFromDimensionBrowser(dimension);
-    const centersByVersion = { 2: [6, 18], 3: [6, 22], 4: [6, 26] };
-    const centers = centersByVersion[version];
-    if (centers) {
-        for (const cx of centers) {
-            for (const cy of centers) {
-                if ((cx <= 8 && cy <= 8) || (cx >= dimension - 8 && cy <= 8) || (cx <= 8 && cy >= dimension - 8)) continue;
-                setRegion(cx - 2, cy - 2, 5, 5);
-            }
-        }
-    }
-    return {
-        has(x, y) {
-            return mask.has(key(x, y));
-        }
-    };
-}
-
-function dataMaskPredicateBrowser(maskId) {
-    switch (maskId | 0) {
-        case 0: return (x, y) => ((y + x) % 2) === 0;
-        case 1: return (_x, y) => (y % 2) === 0;
-        case 2: return (x, _y) => (x % 3) === 0;
-        case 3: return (x, y) => ((y + x) % 3) === 0;
-        case 4: return (x, y) => (((Math.floor(y / 2) + Math.floor(x / 3)) % 2) === 0);
-        case 5: return (x, y) => ((((y * x) % 2) + ((y * x) % 3)) === 0);
-        case 6: return (x, y) => (((((y * x) % 2) + ((y * x) % 3)) % 2) === 0);
-        case 7: return (x, y) => (((((y + x) % 2) + ((y * x) % 3)) % 2) === 0);
-        default: return () => false;
-    }
-}
-
-const FORMAT_INFO_TABLE_BROWSER = [
-    { bits: 0b111011111000100, ec: 'L', mask: 0 },
-    { bits: 0b111001011110011, ec: 'L', mask: 1 },
-    { bits: 0b111110110101010, ec: 'L', mask: 2 },
-    { bits: 0b111100010011101, ec: 'L', mask: 3 },
-    { bits: 0b110011000101111, ec: 'L', mask: 4 },
-    { bits: 0b110001100011000, ec: 'L', mask: 5 },
-    { bits: 0b110110001000001, ec: 'L', mask: 6 },
-    { bits: 0b110100101110110, ec: 'L', mask: 7 },
-    { bits: 0b101010000010010, ec: 'M', mask: 0 },
-    { bits: 0b101000100100101, ec: 'M', mask: 1 },
-    { bits: 0b101111001111100, ec: 'M', mask: 2 },
-    { bits: 0b101101101001011, ec: 'M', mask: 3 },
-    { bits: 0b100010111111001, ec: 'M', mask: 4 },
-    { bits: 0b100000011001110, ec: 'M', mask: 5 },
-    { bits: 0b100111110010111, ec: 'M', mask: 6 },
-    { bits: 0b100101010100000, ec: 'M', mask: 7 },
-    { bits: 0b011010101011111, ec: 'Q', mask: 0 },
-    { bits: 0b011000001101000, ec: 'Q', mask: 1 },
-    { bits: 0b011111100110001, ec: 'Q', mask: 2 },
-    { bits: 0b011101000000110, ec: 'Q', mask: 3 },
-    { bits: 0b010010010110100, ec: 'Q', mask: 4 },
-    { bits: 0b010000110000011, ec: 'Q', mask: 5 },
-    { bits: 0b010111011011010, ec: 'Q', mask: 6 },
-    { bits: 0b010101111101101, ec: 'Q', mask: 7 },
-    { bits: 0b001011010001001, ec: 'H', mask: 0 },
-    { bits: 0b001001110111110, ec: 'H', mask: 1 },
-    { bits: 0b001110011100111, ec: 'H', mask: 2 },
-    { bits: 0b001100111010000, ec: 'H', mask: 3 },
-    { bits: 0b000011101100010, ec: 'H', mask: 4 },
-    { bits: 0b000001001010101, ec: 'H', mask: 5 },
-    { bits: 0b000110100001100, ec: 'H', mask: 6 },
-    { bits: 0b000100000111011, ec: 'H', mask: 7 }
-];
-
-function hammingDistance15Browser(a, b) {
-    let v = a ^ b;
-    let d = 0;
-    while (v) {
-        d += v & 1;
-        v >>>= 1;
-    }
-    return d;
-}
-
-function decodeFormatFromBitsBrowser(bits) {
-    let best = null;
-    let bestDist = 16;
-    for (const entry of FORMAT_INFO_TABLE_BROWSER) {
-        const dist = hammingDistance15Browser(bits, entry.bits);
-        if (dist < bestDist) {
-            bestDist = dist;
-            best = { ec: entry.ec, mask: entry.mask };
-        }
-        if (dist === 0) break;
-    }
-    return bestDist <= 3 ? best : null;
-}
-
-function readFormatInfoBrowser(matrix) {
-    const dim = matrix.width;
-    let bitsTL = 0;
-    for (let x = 0; x <= 8; x++) if (x !== 6) bitsTL = (bitsTL << 1) | (matrix.get(x, 8) ? 1 : 0);
-    for (let y = 7; y >= 0; y--) if (y !== 6) bitsTL = (bitsTL << 1) | (matrix.get(8, y) ? 1 : 0);
-    const decTL = decodeFormatFromBitsBrowser(bitsTL);
-    if (decTL) return decTL;
-    let bitsTR = 0;
-    for (let x = dim - 1; x >= dim - 8; x--) bitsTR = (bitsTR << 1) | (matrix.get(x, 8) ? 1 : 0);
-    for (let y = dim - 7; y <= dim - 1; y++) bitsTR = (bitsTR << 1) | (matrix.get(8, y) ? 1 : 0);
-    return decodeFormatFromBitsBrowser(bitsTR);
-}
-
-// SPQR-aware codeword reader that handles layered color data
-function readSPQRCodewordsBrowser(rgbaData, width, height, version, dataMaskId, originX, originY, modulePx, modules) {
-    const fnMask = buildFunctionMaskBrowser(modules);
-    const dataMask = dataMaskPredicateBrowser(dataMaskId);
-    const baseCodewords = [];
-    const redCodewords = [];
-    let baseByte = 0, redByte = 0;
-    let baseBits = 0, redBits = 0;
-    let readingUp = true;
-
-    // Color classification for SPQR
-    const isBlackRGB = (r,g,b) => r < 128 && g < 128 && b < 128;
-    const isWhiteRGB = (r,g,b) => r > 200 && g > 200 && b > 200;
-
-    const classifyColor = (r,g,b) => {
-        if (isBlackRGB(r,g,b)) return 'BLACK';
-        if (isWhiteRGB(r,g,b)) return 'WHITE';
-        const redExcess = r - Math.max(g,b);
-        const greenExcess = g - Math.max(r,b);
-        if (redExcess > 35 && r > 120 && g < 220) return 'RED';
-        if (greenExcess > 35 && g > 120 && r < 220) return 'GREEN';
-        return 'WHITE'; // fallback
-    };
-
-    console.log(`readSPQRCodewordsBrowser: ${modules}x${modules}, version=${version}, mask=${dataMaskId}`);
-
-    for (let col = modules - 1; col > 0; col -= 2) {
-        if (col === 6) col--;
-        for (let i = 0; i < modules; i++) {
-            const y = readingUp ? (modules - 1 - i) : i;
-            for (let dx = 0; dx < 2; dx++) {
-                const x = col - dx;
-                if (!fnMask.has(x, y)) {
-                    // Sample color from the image at this module position
-                    const cx = originX + x * modulePx + modulePx / 2;
-                    const cy = originY + y * modulePx + modulePx / 2;
-                    const px = Math.round(cx), py = Math.round(cy);
-                    const idx = (py * width + px) * 4;
-                    const r = rgbaData[idx], g = rgbaData[idx + 1], b = rgbaData[idx + 2];
-                    const color = classifyColor(r, g, b);
-
-                    // Map color to base and red layer bits
-                    // WHITE = base=0, red=0
-                    // RED = base=0, red=1  
-                    // BLACK = base=1, red=0
-                    // GREEN = base=1, red=1
-                    let baseBit = 0, redBit = 0;
-                    if (color === 'BLACK') {
-                        baseBit = 1; redBit = 0;
-                    } else if (color === 'RED') {
-                        baseBit = 0; redBit = 1;
-                    } else if (color === 'GREEN') {
-                        baseBit = 1; redBit = 1;
-                    }
-                    // WHITE = base=0, red=0 (default)
-
-                    // Apply data mask to both layers
-                    if (dataMask(x, y)) {
-                        baseBit = baseBit ? 0 : 1;
-                        redBit = redBit ? 0 : 1;
-                    }
-
-                    // Accumulate bits for base layer
-                    baseByte = (baseByte << 1) | baseBit;
-                    baseBits++;
-                    if (baseBits === 8) {
-                        let reversed = 0;
-                        for (let k = 0; k < 8; k++) reversed = (reversed << 1) | ((baseByte >> k) & 1);
-                        baseCodewords.push(reversed & 0xFF);
-                        baseByte = 0;
-                        baseBits = 0;
-                    }
-
-                    // Accumulate bits for red layer
-                    redByte = (redByte << 1) | redBit;
-                    redBits++;
-                    if (redBits === 8) {
-                        let reversed = 0;
-                        for (let k = 0; k < 8; k++) reversed = (reversed << 1) | ((redByte >> k) & 1);
-                        redCodewords.push(reversed & 0xFF);
-                        redByte = 0;
-                        redBits = 0;
-                    }
-
-                    // Debug: log first few modules
-                    if (baseCodewords.length + redCodewords.length <= 16) {
-                        console.log(`Module (${x},${y}): RGB(${r},${g},${b}) → ${color} → base=${baseBit}, red=${redBit}`);
-                    }
-                }
-            }
-        }
-        readingUp = !readingUp;
-    }
-
-    console.log(`Extracted ${baseCodewords.length} base codewords, ${redCodewords.length} red codewords`);
-
-    // Return both layer codeword streams
-    return { base: baseCodewords, red: redCodewords };
-}
-
-function readCodewordsBrowser(matrix, version, dataMaskId) {
-    const dimension = matrix.height;
-    const fnMask = buildFunctionMaskBrowser(dimension);
-    const dataMask = dataMaskPredicateBrowser(dataMaskId);
-    const codewords = [];
-    let byte = 0;
-    let bits = 0;
-    let readingUp = true;
-
-    // Debug: log matrix structure
-    console.log(`readCodewordsBrowser: dimension=${dimension}, version=${version}, mask=${dataMaskId}`);
-    console.log('Matrix first row:', Array.from({length: Math.min(21, dimension)}, (_, i) => matrix.get(i, 0) ? 1 : 0).join(''));
-    for (let col = dimension - 1; col > 0; col -= 2) {
-        if (col === 6) col--;
-        for (let i = 0; i < dimension; i++) {
-            const y = readingUp ? (dimension - 1 - i) : i;
-            for (let dx = 0; dx < 2; dx++) {
-                const x = col - dx;
-                if (!fnMask.has(x, y)) {
-                    let bit = matrix.get(x, y);
-                    if (dataMask(x, y)) bit = !bit;
-                    // Accumulate bits and reverse per codeword to match core decoder behaviour
-                    byte = (byte << 1) | (bit ? 1 : 0);
-                    bits++;
-                    if (bits === 8) {
-                        let reversed = 0;
-                        for (let k = 0; k < 8; k++) reversed = (reversed << 1) | ((byte >> k) & 1);
-                        codewords.push(reversed & 0xFF);
-                        byte = 0;
-                        bits = 0;
-                        // Debug: log first few codewords
-                        if (codewords.length <= 8) {
-                            console.log(`Codeword ${codewords.length}: 0x${(reversed & 0xFF).toString(16).padStart(2, '0')}`);
-                        }
-                    }
-                }
-            }
-        }
-        readingUp = !readingUp;
-    }
-    return codewords;
-}
-
-function getDataByteCountBrowser(version, ec) {
-    const table = {
-        1: { L: 19, M: 16, Q: 13, H: 9 },
-        2: { L: 34, M: 28, Q: 22, H: 16 },
-        3: { L: 55, M: 44, Q: 34, H: 26 },
-        4: { L: 80, M: 64, Q: 48, H: 36 }
-    };
-    return table[version]?.[ec] ?? null;
-}
-
-const browserTextDecoder = (typeof TextDecoder !== 'undefined') ? new TextDecoder('utf-8') : null;
-
-function decodeByteStreamBrowser(bytes, version) {
-    let byteOffset = 0;
-    let bitOffset = 0;
-    const available = () => 8 * (bytes.length - byteOffset) - bitOffset;
-    const readBits = (n) => {
-        if (n < 1 || n > 32 || n > available()) return -1;
-        let result = 0;
-        let remaining = n;
-        if (bitOffset > 0) {
-            const left = 8 - bitOffset;
-            const take = remaining < left ? remaining : left;
-            const mask = (0xFF >> (8 - take)) << (left - take);
-            result = (bytes[byteOffset] & mask) >> (left - take);
-            remaining -= take;
-            bitOffset += take;
-            if (bitOffset === 8) {
-                bitOffset = 0;
-                byteOffset++;
-            }
-        }
-        while (remaining >= 8) {
-            result = (result << 8) | (bytes[byteOffset] & 0xFF);
-            byteOffset++;
-            remaining -= 8;
-        }
-        if (remaining > 0) {
-            const mask = (0xFF >> (8 - remaining)) << (8 - remaining);
-            result = (result << remaining) | ((bytes[byteOffset] & mask) >> (8 - remaining));
-            bitOffset += remaining;
-        }
-        return result >>> 0;
-    };
-    const sizeIdx = version <= 9 ? 0 : version <= 26 ? 1 : 2;
-    let text = '';
-    while (available() >= 4) {
-        const mode = readBits(4);
-        if (mode === -1 || mode === 0) break;
-        if (mode !== 0x4) {
-            // Try to decode any mode as byte mode
-            const countSize = [8, 16, 16][sizeIdx];
-            let len = readBits(countSize);
-            const maxBytes = Math.floor(available() / 8);
-            if (len < 0 || len > maxBytes) len = maxBytes;
-            const chunk = [];
-            for (let i = 0; i < len && i < 64; i++) {
-                const b = readBits(8);
-                if (b < 0) break;
-                chunk.push(b);
-            }
-            if (chunk.length > 0) {
-                text += String.fromCharCode(...chunk);
-            }
-            break;
-        }
-        const countSize = [8, 16, 16][sizeIdx];
-        const len = readBits(countSize);
-        if (len < 0 || len > 1024) return null;
-        const chunk = [];
-        for (let i = 0; i < len; i++) {
-            const b = readBits(8);
-            if (b < 0) return null;
-            chunk.push(b);
-        }
-        if (browserTextDecoder) {
-            try {
-                text += browserTextDecoder.decode(Uint8Array.from(chunk));
-            } catch (err) {
-                logDebug('UTF-8 decode failed', err);
-                text += String.fromCharCode(...chunk);
-            }
-        } else {
-            text += String.fromCharCode(...chunk);
-        }
-    }
-    return text;
-}
-
-function decodeMatrixGuessMaskBrowser(mods, spqrData = null) {
-    // If we have SPQR data, use the SPQR-aware decoder
-    if (spqrData) {
-        const { rgbaData, width, height, originX, originY, modulePx, modules } = spqrData;
-        return decodeSPQRMatrixGuessMaskBrowser(rgbaData, width, height, originX, originY, modulePx, modules);
-    }
-
-    // Standard QR decoding for non-SPQR matrices
-    const matrix = matrixFromModules(mods);
-    const dimension = matrix.width;
-    const version = computeVersionFromDimensionBrowser(dimension);
-    const makeView = (rot, mirror) => ({
-        width: matrix.width,
-        height: matrix.height,
-        get(x, y) {
-            const d = matrix.width;
-            let xx = x;
-            let yy = y;
-            if (rot === 1) {
-                xx = d - 1 - y;
-                yy = x;
-            } else if (rot === 2) {
-                xx = d - 1 - x;
-                yy = d - 1 - y;
-            } else if (rot === 3) {
-                xx = y;
-                yy = d - 1 - x;
-            }
-            if (mirror) xx = d - 1 - xx;
-            return matrix.get(xx, yy);
-        }
-    });
-    for (let rot = 0; rot < 4; rot++) {
-        for (const mir of [false, true]) {
-            const view = makeView(rot, mir);
-            const fmt = readFormatInfoBrowser(view);
-            if (fmt) {
-                const code = readCodewordsBrowser(view, version, fmt.mask);
-                const dataCount = getDataByteCountBrowser(version, fmt.ec);
-                const payload = dataCount ? code.slice(0, dataCount) : code;
-                const text = decodeByteStreamBrowser(Uint8Array.from(payload), version);
-                if (text) return { text, mask: fmt.mask, version };
-            }
-            // Try all masks and accept first valid text
-            for (let mask = 0; mask < 8; mask++) {
-                const codewords = readCodewordsBrowser(view, version, mask);
-                if (!codewords.length) continue;
-
-                // Debug: log first 16 codewords and mode nibble
-                if (codewords.length >= 4) {
-                    const first16 = Array.from(codewords.slice(0, 16)).map(c => c.toString(16).padStart(2, '0')).join(' ');
-                    const mode = (codewords[0] >> 4) & 0xF;
-                    const length = codewords[1] | ((codewords[0] & 0xF) << 8);
-                    console.log(`Rot ${rot} mir ${mir} mask ${mask}: mode=${mode} len=${length} first16=[${first16}] codewords=${codewords.length}`);
-                }
-
-                const text = decodeByteStreamBrowser(Uint8Array.from(codewords), version);
-                if (text) return { text, mask, version };
-            }
-        }
-    }
-    return null;
-}
-
-// SPQR-aware matrix decoder that extracts and decodes layers directly
-function decodeSPQRMatrixGuessMaskBrowser(rgbaData, width, height, originX, originY, modulePx, modules) {
-    const version = computeVersionFromDimensionBrowser(modules);
-
-    // Try different masks and orientations
-    for (let rot = 0; rot < 4; rot++) {
-        for (const mir of [false, true]) {
-            // Create a view that handles rotation and mirroring
-            const makeView = (rot, mirror) => ({
-                get(x, y) {
-                    const d = modules;
-                    let xx = x;
-                    let yy = y;
-                    if (rot === 1) {
-                        xx = d - 1 - y;
-                        yy = x;
-                    } else if (rot === 2) {
-                        xx = d - 1 - x;
-                        yy = d - 1 - y;
-                    } else if (rot === 3) {
-                        xx = y;
-                        yy = d - 1 - x;
-                    }
-                    if (mirror) xx = d - 1 - xx;
-
-                    // Sample color from the rotated/mirrored position
-                    const cx = originX + xx * modulePx + modulePx / 2;
-                    const cy = originY + yy * modulePx + modulePx / 2;
-                    const px = Math.round(cx), py = Math.round(cy);
-                    const idx = (py * width + px) * 4;
-                    const r = rgbaData[idx], g = rgbaData[idx + 1], b = rgbaData[idx + 2];
-
-                    // Classify color and map to bit (for base layer view)
-                    const isBlackRGB = (r,g,b) => r < 128 && g < 128 && b < 128;
-                    const isWhiteRGB = (r,g,b) => r > 200 && g > 200 && b > 200;
-
-                    if (isBlackRGB(r, g, b)) return 1; // BLACK = dark for base layer
-                    if (isWhiteRGB(r, g, b)) return 0; // WHITE = light for base layer
-
-                    // For RED and GREEN, check if they're "dark" for base layer
-                    // RED: base=0 (light), GREEN: base=1 (dark)
-                    const redExcess = r - Math.max(g, b);
-                    const greenExcess = g - Math.max(r, b);
-
-                    if (greenExcess > 35 && g > 120 && r < 220) return 1; // GREEN = dark for base layer
-                    return 0; // RED/WHITE = light for base layer
-                }
-            });
-
-            const view = makeView(rot, mir);
-            const fmt = readFormatInfoBrowser(view);
-            if (fmt) {
-                const codewords = readSPQRCodewordsBrowser(rgbaData, width, height, version, fmt.mask, originX, originY, modulePx, modules);
-                if (codewords.base.length > 0 || codewords.red.length > 0) {
-                    // Try decoding base layer
-                    if (codewords.base.length > 0) {
-                        const baseText = decodeByteStreamBrowser(Uint8Array.from(codewords.base), version);
-                        if (baseText) {
-                            // Try decoding red layer too
-                            if (codewords.red.length > 0) {
-                                const redText = decodeByteStreamBrowser(Uint8Array.from(codewords.red), version);
-                                if (redText) {
-                                    return { text: baseText + redText, mask: fmt.mask, version, layer: 'combined' };
-                                }
-                            }
-                            return { text: baseText, mask: fmt.mask, version, layer: 'base' };
-                        }
-                    }
-
-                    // Try decoding red layer alone
-                    if (codewords.red.length > 0) {
-                        const redText = decodeByteStreamBrowser(Uint8Array.from(codewords.red), version);
-                        if (redText) {
-                            return { text: redText, mask: fmt.mask, version, layer: 'red' };
-                        }
-                    }
-                }
-            }
-
-            // Try all masks
-            for (let mask = 0; mask < 8; mask++) {
-                const codewords = readSPQRCodewordsBrowser(rgbaData, width, height, version, mask, originX, originY, modulePx, modules);
-                if (codewords.base.length > 0 || codewords.red.length > 0) {
-                    // Try decoding base layer
-                    if (codewords.base.length > 0) {
-                        const baseText = decodeByteStreamBrowser(Uint8Array.from(codewords.base), version);
-                        if (baseText) {
-                            // Try decoding red layer too
-                            if (codewords.red.length > 0) {
-                                const redText = decodeByteStreamBrowser(Uint8Array.from(codewords.red), version);
-                                if (redText) {
-                                    return { text: baseText + redText, mask, version, layer: 'combined' };
-                                }
-                            }
-                            return { text: baseText, mask, version, layer: 'base' };
-                        }
-                    }
-
-                    // Try decoding red layer alone
-                    if (codewords.red.length > 0) {
-                        const redText = decodeByteStreamBrowser(Uint8Array.from(codewords.red), version);
-                        if (redText) {
-                            return { text: redText, mask, version, layer: 'red' };
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return null;
-}
 
 // Extract bits from SPQR layers for combined decoding
 function extractSPQRBits(baseMods, redMods) {
@@ -4070,63 +3574,3 @@ function detectSPQRPattern(data, width, height) {
     return colorCount >= 3;
 }
 
-// Extract color bits directly from SPQR image for direct decoding
-function extractSPQRColorBits(data, width, height, originX, originY, modulePx, modules) {
-    const bits = [];
-    let dataModules = 0;
-
-    // Color classification for SPQR
-    const isBlackRGB = (r,g,b) => r < 128 && g < 128 && b < 128;
-    const isWhiteRGB = (r,g,b) => r > 200 && g > 200 && b > 200;
-
-    const classifyColor = (r,g,b) => {
-        if (isBlackRGB(r,g,b)) return 'BLACK';
-        if (isWhiteRGB(r,g,b)) return 'WHITE';
-        const redExcess = r - Math.max(g,b);
-        const greenExcess = g - Math.max(r,b);
-        if (redExcess > 35 && r > 120 && g < 220) return 'RED';
-        if (greenExcess > 35 && g > 120 && r < 220) return 'GREEN';
-        return 'WHITE'; // fallback
-    };
-
-    for (let my = 0; my < modules; my++) {
-        for (let mx = 0; mx < modules; mx++) {
-            // Skip structure areas
-            const isStructure = (mx < 7 && my < 7) || (mx >= modules - 7 && my < 7) || (mx < 7 && my >= modules - 7) ||
-                               (my === 8 && mx <= 8 && mx !== 6) || (mx === 8 && my <= 7 && my !== 6) ||
-                               (my === 8 && mx >= modules - 8) || (mx === 8 && my >= modules - 8 && my !== modules - 1);
-
-            if (!isStructure) {
-                // Sample color directly from image
-                const cx = originX + mx * modulePx + modulePx / 2;
-                const cy = originY + my * modulePx + modulePx / 2;
-                const px = Math.round(cx), py = Math.round(cy);
-                const idx = (py * width + px) * 4;
-                const r = data[idx], g = data[idx + 1], b = data[idx + 2];
-                const color = classifyColor(r, g, b);
-
-                // Map color to bits (4-color SPQR: 2 bits per module)
-                let baseBit = 0, redBit = 0;
-                if (color === 'BLACK') {
-                    baseBit = 1; redBit = 0; // 10
-                } else if (color === 'RED') {
-                    baseBit = 0; redBit = 1; // 01
-                } else if (color === 'GREEN') {
-                    baseBit = 1; redBit = 1; // 11
-                }
-                // WHITE = 00
-
-                bits.push(baseBit, redBit);
-                dataModules++;
-
-                // Debug: log some color mappings
-                if (dataModules <= 10) {
-                    console.log(`SPQR Color Module (${mx},${my}): RGB(${r},${g},${b}) → ${color} → bits=${(baseBit << 1) | redBit}`);
-                }
-            }
-        }
-    }
-
-    console.log(`SPQR: Extracted ${bits.length} bits from ${dataModules} color modules`);
-    return bits;
-}
