@@ -1217,8 +1217,7 @@ async function toggleCamera() {
     }
 }
 
-let scanAttempts = 0;
-let lastStatusUpdate = 0;
+let lastScanState = { found: false, decoded: false, lastUpdate: 0 };
 
 function scanFromVideo() {
     const video = document.getElementById('video');
@@ -1242,53 +1241,70 @@ function scanFromVideo() {
         overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
         
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        scanAttempts++;
         
-        // Update status every 30 frames (~1 second at 30fps)
-        const now = Date.now();
-        if (now - lastStatusUpdate > 1000) {
-            status.textContent = `📷 Scanning... (${scanAttempts} attempts)`;
-            lastStatusUpdate = now;
-        }
+        // Try standard QR detection first (faster and gives us location info)
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: "dontInvert"
+        });
         
-        // Try standard QR detection first (faster)
-        const code = jsQR(imageData.data, imageData.width, imageData.height);
         if (code) {
-            // Draw detection box
-            drawDetectionBox(overlayCtx, code.location);
-            status.textContent = '✅ Standard QR detected!';
+            // Found QR structure! Draw detection box
+            drawDetectionBox(overlayCtx, code.location, '#00ff00');
+            
+            // Successfully decoded as standard QR
+            status.textContent = '✅ Standard QR found & decoded!';
             status.style.background = 'rgba(0, 200, 0, 0.8)';
+            lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
             
             handleScannedCode(code.data);
             return;
         }
         
-        // Try SPQR detection (slower, for multi-layer codes)
-        // Only try every 5 frames to reduce CPU load
-        if (scanAttempts % 5 === 0) {
-            status.textContent = '🔍 Trying SPQR detection...';
+        // Try to find QR structure even if decode failed
+        const foundStructure = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: "attemptBoth"
+        });
+        
+        if (foundStructure && foundStructure.location) {
+            // Found QR structure but couldn't decode - might be SPQR
+            drawDetectionBox(overlayCtx, foundStructure.location, '#ff9900');
+            status.textContent = '⚠️  QR structure found - trying SPQR decode...';
+            status.style.background = 'rgba(255, 153, 0, 0.8)';
+            lastScanState = { found: true, decoded: false, lastUpdate: Date.now() };
+            
+            // Try SPQR detection on this located area
             const spqrResult = detectSPQR(imageData);
             if (spqrResult && spqrResult.text) {
-                status.textContent = `✅ SPQR detected! (${spqrResult.layers || '?'} layers)`;
+                status.textContent = `✅ SPQR decoded! (${spqrResult.layers || '?'} layers)`;
                 status.style.background = 'rgba(0, 200, 0, 0.8)';
+                lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
                 
                 handleScannedCode(spqrResult.text);
                 return;
+            } else {
+                status.textContent = '❌ QR found but decode failed - try better lighting/focus';
+                status.style.background = 'rgba(200, 0, 0, 0.8)';
+            }
+        } else {
+            // No QR structure found at all
+            const now = Date.now();
+            if (now - lastScanState.lastUpdate > 500) {
+                status.textContent = '🔍 Searching for QR code...';
+                status.style.background = 'rgba(0, 0, 0, 0.7)';
+                lastScanState = { found: false, decoded: false, lastUpdate: now };
             }
         }
     }
     
     if (currentStream) {
         requestAnimationFrame(scanFromVideo);
-    } else {
-        scanAttempts = 0;
     }
 }
 
-function drawDetectionBox(ctx, location) {
+function drawDetectionBox(ctx, location, color = '#00ff00') {
     if (!location) return;
     
-    ctx.strokeStyle = '#00ff00';
+    ctx.strokeStyle = color;
     ctx.lineWidth = 4;
     ctx.beginPath();
     ctx.moveTo(location.topLeftCorner.x, location.topLeftCorner.y);
@@ -1297,6 +1313,16 @@ function drawDetectionBox(ctx, location) {
     ctx.lineTo(location.bottomLeftCorner.x, location.bottomLeftCorner.y);
     ctx.closePath();
     ctx.stroke();
+    
+    // Draw corner markers
+    const drawCorner = (x, y) => {
+        ctx.fillStyle = color;
+        ctx.fillRect(x - 6, y - 6, 12, 12);
+    };
+    drawCorner(location.topLeftCorner.x, location.topLeftCorner.y);
+    drawCorner(location.topRightCorner.x, location.topRightCorner.y);
+    drawCorner(location.bottomRightCorner.x, location.bottomRightCorner.y);
+    drawCorner(location.bottomLeftCorner.x, location.bottomLeftCorner.y);
 }
 
 async function handleFileUpload(e) {
@@ -2545,19 +2571,32 @@ function decodeSPQRLayers(imageData) {
 		
 		console.log('   Using color palette:', window.bwrgColors ? 'CUSTOM' : 'DEFAULT');
 		
-		// Step 1: Classify pixels using nearest-neighbor color matching
+		// Step 1: Classify pixels using improved color matching for lighting tolerance
 		const classifyPixel = (r, g, b) => {
 			// BWRG: White, Black, Red, Green
-			// Find nearest color using Euclidean distance
+			// Normalise by brightness to handle reflections and lighting variations
+			const brightness = Math.max(r, g, b);
+			const minBright = Math.min(r, g, b);
+			
+			// Extremely bright or dark pixels - check value first
+			if (brightness > 230 && minBright > 200) return 'W'; // Very white
+			if (brightness < 60) return 'K'; // Very black
+			
+			// For coloured pixels, normalise by brightness and use colour ratios
+			// This makes us more tolerant to lighting variations and reflections
 			let minDist = Infinity;
 			let bestColor = 'W';
 			
 			for (const [colorName, rgb] of Object.entries(paletteRgb)) {
-				const dist = Math.sqrt(
-					Math.pow(r - rgb.r, 2) +
-					Math.pow(g - rgb.g, 2) +
-					Math.pow(b - rgb.b, 2)
-				);
+				// Normalise both pixel and palette colour
+				const paletteBright = Math.max(rgb.r, rgb.g, rgb.b) || 1;
+				const pixelBright = brightness || 1;
+				
+				// Calculate distance using normalised ratios
+				const distR = Math.pow((r / pixelBright) - (rgb.r / paletteBright), 2);
+				const distG = Math.pow((g / pixelBright) - (rgb.g / paletteBright), 2);
+				const distB = Math.pow((b / pixelBright) - (rgb.b / paletteBright), 2);
+				const dist = Math.sqrt(distR + distG + distB);
 				
 				if (dist < minDist) {
 					minDist = dist;
@@ -2850,7 +2889,7 @@ function decodeCMYRGBLayers(imageData) {
 		
 		console.log('   Using color palette:', window.cmyrgbColors ? 'CUSTOM' : 'DEFAULT');
 		
-		// Step 1: Classify pixels using nearest-neighbor color matching
+		// Step 1: Classify pixels using improved color matching for lighting tolerance
 		const classifyPixel = (r, g, b) => {
 			// CMYRGB color mapping (used in generator):
 			// White (W): C=0, M=0, Y=0
@@ -2862,16 +2901,29 @@ function decodeCMYRGBLayers(imageData) {
 			// Blue  (B): C=1, M=1, Y=0
 			// Black (K): C=1, M=1, Y=1
 			
-			// Find nearest color using Euclidean distance
+			// Normalise by brightness to handle reflections and lighting variations
+			const brightness = Math.max(r, g, b);
+			const minBright = Math.min(r, g, b);
+			
+			// Extremely bright or dark pixels - check value first
+			if (brightness > 230 && minBright > 200) return 'W'; // Very white
+			if (brightness < 60) return 'K'; // Very black
+			
+			// For coloured pixels, normalise by brightness and use colour ratios
+			// This makes us more tolerant to lighting variations and reflections
 			let minDist = Infinity;
 			let bestColor = 'W';
 			
 			for (const [colorName, rgb] of Object.entries(paletteRgb)) {
-				const dist = Math.sqrt(
-					Math.pow(r - rgb.r, 2) +
-					Math.pow(g - rgb.g, 2) +
-					Math.pow(b - rgb.b, 2)
-				);
+				// Normalise both pixel and palette colour
+				const paletteBright = Math.max(rgb.r, rgb.g, rgb.b) || 1;
+				const pixelBright = brightness || 1;
+				
+				// Calculate distance using normalised ratios
+				const distR = Math.pow((r / pixelBright) - (rgb.r / paletteBright), 2);
+				const distG = Math.pow((g / pixelBright) - (rgb.g / paletteBright), 2);
+				const distB = Math.pow((b / pixelBright) - (rgb.b / paletteBright), 2);
+				const dist = Math.sqrt(distR + distG + distB);
 				
 				if (dist < minDist) {
 					minDist = dist;
