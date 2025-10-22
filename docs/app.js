@@ -1183,64 +1183,120 @@ function setupDownloadLink(elementId, content, mimeType) {
 async function toggleCamera() {
     const video = document.getElementById('video');
     const btn = document.getElementById('cameraBtn');
+    const preview = document.getElementById('camera-preview');
+    const status = document.getElementById('scan-status');
     
     if (currentStream) {
         // Stop camera
         currentStream.getTracks().forEach(track => track.stop());
         currentStream = null;
-        video.style.display = 'none';
-        btn.textContent = 'Use Camera';
+        preview.style.display = 'none';
+        btn.textContent = '📷 Use Camera';
     } else {
         // Start camera
         try {
+            status.textContent = 'Starting camera...';
+            preview.style.display = 'block';
+            
             currentStream = await navigator.mediaDevices.getUserMedia({ 
-                video: { facingMode: 'environment' } 
+                video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
             });
             video.srcObject = currentStream;
-            video.style.display = 'block';
             await video.play(); // Wait for video to start playing
-            btn.textContent = 'Stop Camera';
+            btn.textContent = '🛑 Stop Camera';
+            
+            status.textContent = '📷 Scanning... Point camera at QR code';
             
             // Start scanning
             scanFromVideo();
         } catch (error) {
             console.error('Camera error:', error);
-            alert('Could not access camera: ' + error.message);
+            status.textContent = '❌ Camera error: ' + error.message;
+            setTimeout(() => preview.style.display = 'none', 3000);
         }
     }
 }
 
+let scanAttempts = 0;
+let lastStatusUpdate = 0;
+
 function scanFromVideo() {
     const video = document.getElementById('video');
     const canvas = document.getElementById('canvas');
+    const overlayCanvas = document.getElementById('overlay-canvas');
+    const status = document.getElementById('scan-status');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const overlayCtx = overlayCanvas.getContext('2d');
     
     if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        // Match canvas size to video
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
+        overlayCanvas.width = video.videoWidth;
+        overlayCanvas.height = video.videoHeight;
+        
         ctx.imageSmoothingEnabled = false; // Preserve exact pixels for SPQR
         ctx.drawImage(video, 0, 0);
         
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        // Clear overlay
+        overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
         
-        // Try SPQR detection first (for multi-layer codes)
-        const spqrResult = detectSPQR(imageData);
-        if (spqrResult && spqrResult.text) {
-            handleScannedCode(spqrResult.text);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        scanAttempts++;
+        
+        // Update status every 30 frames (~1 second at 30fps)
+        const now = Date.now();
+        if (now - lastStatusUpdate > 1000) {
+            status.textContent = `📷 Scanning... (${scanAttempts} attempts)`;
+            lastStatusUpdate = now;
+        }
+        
+        // Try standard QR detection first (faster)
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code) {
+            // Draw detection box
+            drawDetectionBox(overlayCtx, code.location);
+            status.textContent = '✅ Standard QR detected!';
+            status.style.background = 'rgba(0, 200, 0, 0.8)';
+            
+            handleScannedCode(code.data);
             return;
         }
         
-        // Fall back to standard QR detection
-        const code = jsQR(imageData.data, imageData.width, imageData.height);
-        if (code) {
-            handleScannedCode(code.data);
-            return;
+        // Try SPQR detection (slower, for multi-layer codes)
+        // Only try every 5 frames to reduce CPU load
+        if (scanAttempts % 5 === 0) {
+            status.textContent = '🔍 Trying SPQR detection...';
+            const spqrResult = detectSPQR(imageData);
+            if (spqrResult && spqrResult.text) {
+                status.textContent = `✅ SPQR detected! (${spqrResult.layers || '?'} layers)`;
+                status.style.background = 'rgba(0, 200, 0, 0.8)';
+                
+                handleScannedCode(spqrResult.text);
+                return;
+            }
         }
     }
     
     if (currentStream) {
         requestAnimationFrame(scanFromVideo);
+    } else {
+        scanAttempts = 0;
     }
+}
+
+function drawDetectionBox(ctx, location) {
+    if (!location) return;
+    
+    ctx.strokeStyle = '#00ff00';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(location.topLeftCorner.x, location.topLeftCorner.y);
+    ctx.lineTo(location.topRightCorner.x, location.topRightCorner.y);
+    ctx.lineTo(location.bottomRightCorner.x, location.bottomRightCorner.y);
+    ctx.lineTo(location.bottomLeftCorner.x, location.bottomLeftCorner.y);
+    ctx.closePath();
+    ctx.stroke();
 }
 
 async function handleFileUpload(e) {
@@ -1339,7 +1395,8 @@ function detectSPQR(imageData) {
     console.log(`  Color ratio: ${colorPercentage.toFixed(3)} (${coloredPixels} colored pixels)`);
     
     // If we have significant color content, determine BWRG vs CMYRGB by checking finder patterns
-    if (colorPercentage > 0.01) { // More than 1% colored pixels
+    // Lower threshold for camera images which may have compression artifacts
+    if (colorPercentage > 0.005) { // More than 0.5% colored pixels
         // BWRG has SOLID colors in finder centers (3x3 module area)
         // CMYRGB has 2x2 GRID of colors in finder centers
         // Sample the top-left finder center to check
@@ -1360,7 +1417,8 @@ function detectSPQR(imageData) {
             
             if (roundedModulePx < 2) continue;
             
-            if (testRemainder < 0.2) {
+            // More tolerant for camera images (0.3 instead of 0.2)
+            if (testRemainder < 0.3) {
                 candidates.push({
                     modules: testModules,
                     modulePx: roundedModulePx,
@@ -2519,7 +2577,7 @@ function decodeSPQRLayers(imageData) {
 	let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
 	
 	// Search through valid QR versions (21, 25, 29, ... 177 modules)
-	// Collect all candidates with very good fit (remainder < 0.2)
+	// Collect all candidates with very good fit (remainder < 0.3 for camera tolerance)
 	const candidates = [];
 	
 	for (let testModules = 21; testModules <= 177; testModules += 4) {
@@ -2531,7 +2589,7 @@ function decodeSPQRLayers(imageData) {
 		if (roundedModulePx < 2) continue;
 		
 		// Collect candidates with good fit
-		if (testRemainder < 0.2) {
+		if (testRemainder < 0.3) {
 			candidates.push({
 				modules: testModules,
 				modulePx: testModulePx,
@@ -2833,7 +2891,7 @@ function decodeCMYRGBLayers(imageData) {
 	let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
 	
 	// Search through valid QR versions (21, 25, 29, ... 177 modules)
-	// Collect all candidates with very good fit (remainder < 0.2)
+	// Collect all candidates with very good fit (remainder < 0.3 for camera tolerance)
 	const candidates = [];
 	
 	for (let testModules = 21; testModules <= 177; testModules += 4) {
@@ -2845,7 +2903,7 @@ function decodeCMYRGBLayers(imageData) {
 		if (roundedModulePx < 2) continue;
 		
 		// Collect candidates with good fit
-		if (testRemainder < 0.2) {
+		if (testRemainder < 0.3) {
 			candidates.push({
 				modules: testModules,
 				modulePx: testModulePx,
