@@ -1198,6 +1198,7 @@ async function toggleCamera() {
             });
             video.srcObject = currentStream;
             video.style.display = 'block';
+            await video.play(); // Wait for video to start playing
             btn.textContent = 'Stop Camera';
             
             // Start scanning
@@ -1212,16 +1213,25 @@ async function toggleCamera() {
 function scanFromVideo() {
     const video = document.getElementById('video');
     const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     
     if (video.readyState === video.HAVE_ENOUGH_DATA) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
+        ctx.imageSmoothingEnabled = false; // Preserve exact pixels for SPQR
         ctx.drawImage(video, 0, 0);
         
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code = jsQR(imageData.data, imageData.width, imageData.height);
         
+        // Try SPQR detection first (for multi-layer codes)
+        const spqrResult = detectSPQR(imageData);
+        if (spqrResult && spqrResult.text) {
+            handleScannedCode(spqrResult.text);
+            return;
+        }
+        
+        // Fall back to standard QR detection
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
         if (code) {
             handleScannedCode(code.data);
             return;
@@ -3064,12 +3074,28 @@ function decodeCMYRGBLayers(imageData) {
 				console.log(`✅ Data verified with parity: ${combined.length} bytes`);
 			} else {
 				// Both layers corrupt, can't recover
-				combined = null;
-				console.log(`❌ Both layers corrupt, recovery failed`);
+				console.log(`❌ Parity recovery failed - need at least 1 valid data layer`);
+				// But still try to return whatever we have
+				if (baseText || redText) {
+					combined = (baseText || '') + (redText || '');
+					console.log(`⚠️  Returning partial data (${combined.length} bytes)`);
+				} else {
+					combined = null;
+				}
 			}
 		} else {
 			// Standard or hybrid mode: all 3 layers are data
-			combined = (baseText || '') + (redText || '') + (greenText || '');
+			// In standard/hybrid mode, return data even if some layers failed
+			const hasAnyData = baseText || redText || greenText;
+			if (!hasAnyData) {
+				combined = null; // All layers failed
+			} else {
+				combined = (baseText || '') + (redText || '') + (greenText || '');
+				const failedLayers = [!baseText && 'Base', !redText && 'Red', !greenText && 'Green'].filter(Boolean);
+				if (failedLayers.length > 0) {
+					console.log(`⚠️  Partial decode: ${failedLayers.join(', ')} layer(s) failed`);
+				}
+			}
 		}
 		
             return {
