@@ -1299,6 +1299,7 @@ function drawGridRect(ctx, x, y, w, h, color = '#ff9900') {
 
 function sampleFinderRefsWithOrigin(rgba, width, height, modulePx, modulesTotal, marginModules, originX, originY) {
 	// Sample approximate finder inner squares for red/green/black references with absolute origin
+	// BWRG layout: TL=RED, TR=GREEN, BL=BLACK
 	const sampleMean = (cx, cy, radius) => {
 		let r=0,g=0,b=0,c=0;
 		for (let y = Math.max(0, cy-radius); y < Math.min(height, cy+radius); y++) {
@@ -1312,10 +1313,20 @@ function sampleFinderRefsWithOrigin(rgba, width, height, modulePx, modulesTotal,
 		}
 		return c ? { r: Math.round(r/c), g: Math.round(g/c), b: Math.round(b/c) } : { r:0,g:0,b:0 };
 	};
-	const innerCenterOffset = (marginModules + 3) * modulePx + Math.floor(modulePx/2);
-	const tl = sampleMean(originX + innerCenterOffset, originY + innerCenterOffset, Math.max(2, Math.floor(modulePx)));
-	const tr = sampleMean(originX + (modulesTotal - 7) * modulePx + Math.floor(modulePx/2), originY + innerCenterOffset, Math.max(2, Math.floor(modulePx)));
-	const bl = sampleMean(originX + innerCenterOffset, originY + (modulesTotal - 7) * modulePx + Math.floor(modulePx/2), Math.max(2, Math.floor(modulePx)));
+	// Each finder is 7x7 modules; inner 3x3 starts at +2 modules from finder origin
+	// Finder inner center is at +3.5 modules from finder origin (middle of the 3x3)
+	const tlFinderX = originX + marginModules * modulePx;  // TL finder starts at margin
+	const tlFinderY = originY + marginModules * modulePx;
+	const trFinderX = originX + (marginModules + modulesTotal - 7) * modulePx;  // TR finder starts at margin + (modules - 7)
+	const trFinderY = originY + marginModules * modulePx;
+	const blFinderX = originX + marginModules * modulePx;
+	const blFinderY = originY + (marginModules + modulesTotal - 7) * modulePx;
+	
+	// Sample center of inner 3x3 (at +3.5 modules from finder origin)
+	const innerOffset = 3.5 * modulePx;
+	const tl = sampleMean(tlFinderX + innerOffset, tlFinderY + innerOffset, Math.max(2, Math.floor(modulePx)));
+	const tr = sampleMean(trFinderX + innerOffset, trFinderY + innerOffset, Math.max(2, Math.floor(modulePx)));
+	const bl = sampleMean(blFinderX + innerOffset, blFinderY + innerOffset, Math.max(2, Math.floor(modulePx)));
 	return { type: 'BWRG', samples: { red: tl, green: tr, black: bl } };
 }
 
