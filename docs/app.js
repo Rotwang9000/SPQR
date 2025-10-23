@@ -3266,9 +3266,11 @@ function decodeCMYRGBLayers(imageData) {
 		enforceFinders(redMods);
 		
 		// Step 5: Decode layers
-		const decodeLayer = (mods, layerName) => {
-			// Scale up for jsQR (now has alignment patterns so moderate scale is fine)
-			const scale = 8;
+	const decodeLayer = (mods, layerName) => {
+		// Try multiple scaling factors (jsQR is finicky about scale)
+		const scales = [8, 12, 16, 4, 6, 10];
+		
+		for (const scale of scales) {
 			const scaledSize = modules * scale;
 			const rgba = new Uint8ClampedArray(scaledSize * scaledSize * 4);
 			
@@ -3285,21 +3287,33 @@ function decodeCMYRGBLayers(imageData) {
 				}
 			}
 			
-			const result = jsQR(rgba, scaledSize, scaledSize);
-			if (result) {
-				console.log(`   ✅ ${layerName}: "${result.data}"`);
+			// Try with different inversion modes
+			const result = jsQR(rgba, scaledSize, scaledSize, { inversionAttempts: "attemptBoth" });
+			if (result && result.data) {
+				console.log(`   ✅ ${layerName} (scale ${scale}px): "${result.data}"`);
 				return result.data;
-			} else {
-				console.log(`   ❌ ${layerName} failed`);
-				return null;
 			}
-		};
+		}
 		
-		const baseText = decodeLayer(baseMods, 'Base layer');
-		const greenText = decodeLayer(greenMods, 'Green layer');
-		const redText = decodeLayer(redMods, 'Red layer');
+		console.log(`   ❌ ${layerName} failed (tried ${scales.length} scales)`);
+		return null;
+	};
 		
-		// Check if this is parity mode (green layer starts with SPQRv1|)
+	let baseText = decodeLayer(baseMods, 'Base layer');
+	let greenText = decodeLayer(greenMods, 'Green layer');
+	let redText = decodeLayer(redMods, 'Red layer');
+	
+	// AGGRESSIVE RECOVERY: If all layers failed, try with inverted bits
+	if (!baseText && !greenText && !redText) {
+		console.log('⚡ ALL layers failed jsQR - trying AGGRESSIVE bit inversion recovery...');
+		const invertMods = (mods) => mods.map(row => row.map(bit => !bit));
+		
+		baseText = decodeLayer(invertMods(baseMods), 'Base layer (inverted)');
+		if (!baseText) greenText = decodeLayer(invertMods(greenMods), 'Green layer (inverted)');
+		if (!baseText && !greenText) redText = decodeLayer(invertMods(redMods), 'Red layer (inverted)');
+	}
+	
+	// Check if this is parity mode (green layer starts with SPQRv1|)
 		let combined = null;
 		let parityInfo = null;
 		
