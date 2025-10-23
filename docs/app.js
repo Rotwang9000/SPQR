@@ -104,8 +104,8 @@ async function generateSpqrClient(text, options) {
 	const ecMode = options.errorCorrection || 'standard';
 
 	// Split payload based on EC mode
-	let baseText, redText, greenText;
-	let baseEC = 'L', redEC = 'L', greenEC = 'L';
+	let baseText, redText;
+	let baseEC = 'L', redEC = 'L';
 	
 	if (ecMode === 'parity' && isEightColour) {
 		// Parity mode: Use only 2 layers for data, 3rd for parity
@@ -113,15 +113,13 @@ async function generateSpqrClient(text, options) {
 		baseText = parts[0] || '';
 		redText = parts[1] || '';
 		// Generate parity data (simple CRC32 + XOR for now)
-		greenText = generateParityData(baseText, redText);
-		console.log(`SPQR Parity mode: ${baseText.length} + ${redText.length} bytes data, ${greenText.length} bytes parity`);
+		console.log(`SPQR Parity mode: ${baseText.length} + ${redText.length} bytes data, ${generateParityData(baseText, redText).length} bytes parity`);
 	} else if (ecMode === 'hybrid') {
 		// Hybrid mode: First layer gets EC 'M' for critical data
 	const splits = isEightColour ? 3 : 2;
 	const parts = splitPayload(text, splits);
 		baseText = parts[0] || '';
 		redText = parts[1] || '';
-		greenText = isEightColour ? (parts[2] || '') : '';
 		baseEC = 'M';  // Base layer gets higher EC
 		console.log(`SPQR Hybrid mode: Base EC 'M' (${baseText.length}b), others EC 'L'`);
 	} else {
@@ -130,15 +128,13 @@ async function generateSpqrClient(text, options) {
 		const parts = splitPayload(text, splits);
 		baseText = parts[0] || '';
 		redText = parts[1] || '';
-		greenText = isEightColour ? (parts[2] || '') : '';
 		console.log(`SPQR Standard mode: All layers EC 'L', ${splits} layers`);
 	}
 
 	// First pass to find max version needed
 	const encodes = [
 		makeQrAuto(baseText, baseEC),
-		makeQrAuto(redText, redEC),
-		greenText ? makeQrAuto(greenText, greenEC) : null
+		makeQrAuto(redText, redEC)
 	].filter(Boolean);
 	const moduleCounts = encodes.map(qr => qr.getModuleCount());
 	const maxModules = moduleCounts.length ? Math.max.apply(null, moduleCounts) : 21;
@@ -154,7 +150,6 @@ async function generateSpqrClient(text, options) {
 	// Regenerate with fixed version
 	const baseQr = makeQrFixed(targetVersion, baseEC, baseText);
 	const redQr = makeQrFixed(targetVersion, redEC, redText);
-	const greenQr = isEightColour && greenText ? makeQrFixed(targetVersion, greenEC, greenText) : null;
 
 	const modules = baseQr.getModuleCount();
 	const margin = 4;
@@ -182,11 +177,10 @@ async function generateSpqrClient(text, options) {
 			
 			const b = dark(baseQr, x, y) ? 1 : 0;
 			const r = dark(redQr, x, y) ? 1 : 0;
-			const g = isEightColour ? (dark(greenQr, x, y) ? 1 : 0) : (b & r);
 			
 			let colour = '#ffffff';
 			if (isEightColour) {
-				const code = (b << 2) | (g << 1) | r; // 0..7
+				const code = (b << 2) | (r << 1); // 0..7
 				const idxMap = [0,1,2,3,4,5,6,7];
 				colour = colours[idxMap[code]] || '#000000';
 			} else {
@@ -506,142 +500,67 @@ function estimateGrid(mask, width, height) {
 function locateQRStructure(data, width, height) {
 	console.log(`locateQRStructure: ${width}x${height} image`);
 	// Pre-normalise: approximate white-balance and contrast stretch for robustness
-	// Compute global average of brightest channel to estimate illumination
 	let sumBright = 0, count = 0;
-	for (let i = 0; i < data.length; i += 20) {
-		const r = data[i], g = data[i+1], b = data[i+2];
-		sumBright += Math.max(r,g,b);
-		count++;
-	}
+	for (let i = 0; i < data.length; i += 20) { const r = data[i], g = data[i+1], b = data[i+2]; sumBright += Math.max(r,g,b); count++; }
 	const avgBright = Math.max(80, Math.min(220, Math.round(sumBright / Math.max(1,count))));
 	const gain = avgBright > 0 ? 180 / avgBright : 1.0; // target around 180 mid-brightness
-	
-	// Consider any non-white pixel as part of QR structure with tolerance
 	const isQRPixel = (x, y) => {
 		const i = (y * width + x) * 4;
-		// Apply simple gain
 		let r = Math.min(255, Math.round(data[i] * gain));
 		let g = Math.min(255, Math.round(data[i+1] * gain));
 		let b = Math.min(255, Math.round(data[i+2] * gain));
-		// Compute brightness and chroma
 		const maxc = Math.max(r,g,b), minc = Math.min(r,g,b);
-		const brightness = maxc; // 0..255
-		const chroma = maxc - minc; // 0..255
-		// Treat near-white as background; anything with enough chroma or dark counts as QR
+		const brightness = maxc; const chroma = maxc - minc;
 		if (brightness > 235 && chroma < 12) return false; // near-white
 		if (brightness < 60) return true; // dark
 		return chroma > 10; // coloured/darker content
 	};
-	
 	const finderCandidates = [];
-	
-	// Scan horizontal lines for 1:1:3:1:1 patterns
+	// Horizontal scan
 	for (let y = 0; y < height; y += Math.max(1, Math.floor(height/40))) {
-		const runs = [];
-		let lastWasQR = false;
-		let runLength = 0;
-		
-		for (let x = 0; x <= width; x++) {
-			const isQR = x < width ? isQRPixel(x, y) : false;
-			if (x === 0) { lastWasQR = isQR; runLength = 1; continue; }
-			if (isQR === lastWasQR && x < width) { runLength++; }
-			else { runs.push({ dark: lastWasQR, length: runLength, endX: x - 1 }); lastWasQR = isQR; runLength = 1; }
-		}
-		
+		const runs = []; let last = false, len = 0;
+		for (let x = 0; x <= width; x++) { const cur = x<width ? isQRPixel(x,y) : false; if (x===0){last=cur;len=1;continue;} if (cur===last && x<width) len++; else { runs.push({dark:last,len,endX:x-1}); last=cur; len=1; } }
 		for (let i = 2; i < runs.length - 2; i++) {
-			const [r1, r2, r3, r4, r5] = [runs[i-2], runs[i-1], runs[i], runs[i+1], runs[i+2]];
-			if (r1.dark && !r2.dark && r3.dark && !r4.dark && r5.dark) {
-				const [l1, l2, l3, l4, l5] = [r1.length, r2.length, r3.length, r4.length, r5.length];
-				const total = l1 + l2 + l3 + l4 + l5;
-				if (total >= 12) {
-					const ratios = [l1, l2, l3, l4, l5].map(len => len / total);
-					if (Math.abs(ratios[0] - 0.14) < 0.10 && Math.abs(ratios[1] - 0.14) < 0.10 && Math.abs(ratios[2] - 0.43) < 0.18 && Math.abs(ratios[3] - 0.14) < 0.10 && Math.abs(ratios[4] - 0.14) < 0.10) {
-						const centerX = r1.endX - l1 + 1 + l1 + l2 + Math.floor(l3/2);
-						const modulePx = Math.max(3, Math.round(l3 / 3));
-						finderCandidates.push({ x: centerX, y, modulePx, strength: total });
-					}
-				}
-			}
+			const a=runs[i-2], b=runs[i-1], c=runs[i], d=runs[i+1], e=runs[i+2];
+			if (a.dark && !b.dark && c.dark && !d.dark && e.dark) { const t=a.len+b.len+c.len+d.len+e.len; if (t>=12) { const r=[a.len,b.len,c.len,d.len,e.len].map(v=>v/t); if (Math.abs(r[0]-0.14)<0.10 && Math.abs(r[1]-0.14)<0.10 && Math.abs(r[2]-0.43)<0.18 && Math.abs(r[3]-0.14)<0.10 && Math.abs(r[4]-0.14)<0.10) { const centerX = a.endX - a.len + 1 + a.len + b.len + Math.floor(c.len/2); const modulePx = Math.max(3, Math.round(c.len/3)); finderCandidates.push({ x:centerX, y, modulePx, strength:t }); } } }
 		}
 	}
-	
-	// Scan vertical lines for 1:1:3:1:1 patterns
+	// Vertical scan
 	for (let x = 0; x < width; x += Math.max(1, Math.floor(width/40))) {
-		const runs = [];
-		let lastWasQR = false;
-		let runLength = 0;
-		for (let y = 0; y <= height; y++) {
-			const isQR = y < height ? isQRPixel(x, y) : false;
-			if (y === 0) { lastWasQR = isQR; runLength = 1; continue; }
-			if (isQR === lastWasQR && y < height) { runLength++; }
-			else { runs.push({ dark: lastWasQR, length: runLength, endY: y - 1 }); lastWasQR = isQR; runLength = 1; }
-		}
+		const runs = []; let last = false, len = 0;
+		for (let y = 0; y <= height; y++) { const cur = y<height ? isQRPixel(x,y) : false; if (y===0){last=cur;len=1;continue;} if (cur===last && y<height) len++; else { runs.push({dark:last,len,endY:y-1}); last=cur; len=1; } }
 		for (let i = 2; i < runs.length - 2; i++) {
-			const [r1, r2, r3, r4, r5] = [runs[i-2], runs[i-1], runs[i], runs[i+1], runs[i+2]];
-			if (r1.dark && !r2.dark && r3.dark && !r4.dark && r5.dark) {
-				const [l1, l2, l3, l4, l5] = [r1.length, r2.length, r3.length, r4.length, r5.length];
-				const total = l1 + l2 + l3 + l4 + l5;
-				if (total >= 12) {
-					const ratios = [l1, l2, l3, l4, l5].map(len => len / total);
-					if (Math.abs(ratios[0] - 0.14) < 0.10 && Math.abs(ratios[1] - 0.14) < 0.10 && Math.abs(ratios[2] - 0.43) < 0.18 && Math.abs(ratios[3] - 0.14) < 0.10 && Math.abs(ratios[4] - 0.14) < 0.10) {
-						const centerY = r1.endY - l1 + 1 + l1 + l2 + Math.floor(l3/2);
-						const modulePx = Math.max(3, Math.round(l3 / 3));
-						finderCandidates.push({ x, y: centerY, modulePx, strength: total });
-					}
-				}
-			}
+			const a=runs[i-2], b=runs[i-1], c=runs[i], d=runs[i+1], e=runs[i+2];
+			if (a.dark && !b.dark && c.dark && !d.dark && e.dark) { const t=a.len+b.len+c.len+d.len+e.len; if (t>=12) { const r=[a.len,b.len,c.len,d.len,e.len].map(v=>v/t); if (Math.abs(r[0]-0.14)<0.10 && Math.abs(r[1]-0.14)<0.10 && Math.abs(r[2]-0.43)<0.18 && Math.abs(r[3]-0.14)<0.10 && Math.abs(r[4]-0.14)<0.10) { const centerY = a.endY - a.len + 1 + a.len + b.len + Math.floor(c.len/2); const modulePx = Math.max(3, Math.round(c.len/3)); finderCandidates.push({ x, y:centerY, modulePx, strength:t }); } } }
 		}
 	}
-	
-	if (finderCandidates.length < 6) {
-		console.log(`Found only ${finderCandidates.length} finder candidates, need at least 6`);
-		return null;
-	}
-	
-	// Cluster candidates into 3 finder locations
-	const avgModulePx = finderCandidates.reduce((sum, c) => sum + c.modulePx, 0) / finderCandidates.length;
-	const clusters = [];
-	for (const candidate of finderCandidates) {
-		let foundCluster = false;
-		for (const cluster of clusters) {
-			const dx = candidate.x - cluster.x;
-			const dy = candidate.y - cluster.y;
-			const distance = Math.sqrt(dx*dx + dy*dy);
-			if (distance < avgModulePx * 5) {
-				cluster.x = (cluster.x * cluster.count + candidate.x) / (cluster.count + 1);
-				cluster.y = (cluster.y * cluster.count + candidate.y) / (cluster.count + 1);
-				cluster.strength += candidate.strength;
-				cluster.count++;
-				foundCluster = true;
-				break;
-			}
-		}
-		if (!foundCluster) {
-			clusters.push({ x: candidate.x, y: candidate.y, strength: candidate.strength, count: 1 });
-		}
-	}
-	clusters.sort((a, b) => b.strength - a.strength);
-	const finders = clusters.slice(0, 3);
-	if (finders.length < 3) {
-		console.log(`Found only ${finders.length} finder clusters, need 3`);
-		return null;
-	}
-	
-	const minX = Math.min(...finders.map(f => f.x));
-	const maxX = Math.max(...finders.map(f => f.x));
-	const minY = Math.min(...finders.map(f => f.y));
-	const maxY = Math.max(...finders.map(f => f.y));
-	const qrWidth = maxX - minX;
-	const qrHeight = maxY - minY;
-	const avgQrSize = (qrWidth + qrHeight) / 2;
-	const modulePx = Math.round(avgModulePx);
-	const modulesEstimate = Math.round(avgQrSize / modulePx) + 7;
-	const estimatedVersion = Math.max(1, Math.round((modulesEstimate - 17) / 4));
-	const qrModules = 17 + 4 * estimatedVersion;
-	const originX = Math.round(minX - 7 * modulePx);
-	const originY = Math.round(minY - 7 * modulePx);
-	console.log(`QR analysis: finder spacing ${avgQrSize.toFixed(1)}px → ${qrModules} modules → version ${estimatedVersion} (${qrModules}×${qrModules})`);
-	return { finders, modulePx, qrModules, originX: Math.max(0, originX), originY: Math.max(0, originY) };
+	if (finderCandidates.length < 6) { console.log(`Found only ${finderCandidates.length} finder candidates, need at least 6`); return null; }
+	// Cluster
+	const avgModulePx = finderCandidates.reduce((s,c)=>s+c.modulePx,0)/finderCandidates.length;
+	const clusters=[]; for (const cand of finderCandidates){ let ok=false; for (const cl of clusters){ const dx=cand.x-cl.x, dy=cand.y-cl.y; if (Math.hypot(dx,dy) < avgModulePx*5){ cl.x=(cl.x*cl.count+cand.x)/(cl.count+1); cl.y=(cl.y*cl.count+cand.y)/(cl.count+1); cl.strength+=cand.strength; cl.count++; ok=true; break;} } if(!ok) clusters.push({x:cand.x,y:cand.y,strength:cand.strength,count:1}); }
+	clusters.sort((a,b)=>b.strength-a.strength);
+	const finders = clusters.slice(0,3);
+	if (finders.length<3) { console.log(`Found only ${finders.length} finder clusters, need 3`); return null; }
+	// Label finders by geometry: TL = smallest (x+y), TR = largest x - y, BL = largest y - x
+	const scoreTL = f => f.x + f.y; const scoreTR = f => f.x - f.y; const scoreBL = f => -f.x + f.y;
+	const TL = [...finders].sort((a,b)=>scoreTL(a)-scoreTL(b))[0];
+	const TR = [...finders].sort((a,b)=>scoreTR(b)-scoreTR(a))[0];
+	const BL = [...finders].sort((a,b)=>scoreBL(b)-scoreBL(a))[0];
+	// Derive modulePx from finder spacing between TL<->TR and TL<->BL
+	const spacingX = Math.hypot(TR.x - TL.x, TR.y - TL.y);
+	const spacingY = Math.hypot(BL.x - TL.x, BL.y - TL.y);
+	let modulePx = Math.round(((spacingX + spacingY) / 2) / Math.max(14, Math.round((spacingX + spacingY) / 2 / avgModulePx) - 7)); // robust fallback
+	// Better: estimate version from spacing using 7 modules between inner centres offset (centres are at (3,3) and (modules-4,3)): spacing ≈ (modules-7)*modulePx
+	const modulesEstimateFromX = Math.round(spacingX / Math.max(1,modulePx)) + 7;
+	const modulesEstimateFromY = Math.round(spacingY / Math.max(1,modulePx)) + 7;
+	let modulesEst = Math.max(21, 4*Math.round((Math.round((modulesEstimateFromX+modulesEstimateFromY)/2) - 17)/4) + 17);
+	modulePx = Math.max(3, Math.round(((spacingX + spacingY) / 2) / (modulesEst - 7)));
+	// Origin is TL outer quiet zone: TL inner centre is at (margin+3, margin+3) modules from origin, with margin=4
+	const originX = Math.round(TL.x - (4+3)*modulePx);
+	const originY = Math.round(TL.y - (4+3)*modulePx);
+	const qrModules = modulesEst;
+	console.log(`QR analysis: refined spacing → ${qrModules} modules @ ${modulePx}px, origin=(${originX},${originY})`);
+	return { finders:[TL,TR,BL], modulePx, qrModules, originX: Math.max(0, originX), originY: Math.max(0, originY) };
 }
 
 // Simple run-length based finder locator fallback
@@ -1242,6 +1161,7 @@ function scanFromVideo() {
 			// Provide grid hint and palette calibration from finder refs for decoders
 			window.currentGridHint = { modules: grid.qrModules, modulePx: grid.modulePx, originX: grid.originX, originY: grid.originY };
 			window.cameraCalibration = sampleFinderRefsWithOrigin(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, 4, grid.originX, grid.originY);
+			window.cameraCalibrationCMY = sampleCMYRGBFinderPalette(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, grid.originX, grid.originY);
 			
 			// Attempt SPQR decode on full image (decoder will use hint + calibration)
 			const spqrResult = detectSPQR(imageData);
@@ -3690,5 +3610,20 @@ function detectSPQRPattern(data, width, height) {
 
     // SPQR should have at least 3 different colors with significant presence
     return colorCount >= 3;
+}
+
+function sampleCMYRGBFinderPalette(rgba, width, height, modulePx, modulesTotal, originX, originY) {
+	// TL inner 3×3 contains 2×2 grid for W,R,G,Y; TR contains K,M,C,B
+	const center = (mx,my)=>({ x: originX + Math.round((mx+0.5)*modulePx), y: originY + Math.round((my+0.5)*modulePx) });
+	const sample = (cx,cy,r)=>{ let R=0,G=0,B=0,C=0; for (let y=Math.max(0,cy-r); y<Math.min(height,cy+r); y++){ for(let x=Math.max(0,cx-r); x<Math.min(width,cx+r); x++){ const i=(y*width+x)*4; R+=rgba[i]; G+=rgba[i+1]; B+=rgba[i+2]; C++; }} return C?{r:Math.round(R/C),g:Math.round(G/C),b:Math.round(B/C)}:{r:0,g:0,b:0}; };
+	const r = Math.max(1, Math.floor(modulePx/2));
+	// TL top-left of finder inner area starts at module (margin+2, margin+2)
+	const m = 4; // margin modules
+	const tl00 = center(m+2, m+2); const tl10 = center(m+3, m+2); const tl01 = center(m+2, m+3); const tl11 = center(m+3, m+3);
+	const tr00 = center(modulesTotal - (m+5), m+2); const tr10 = center(modulesTotal - (m+4), m+2); const tr01 = center(modulesTotal - (m+5), m+3); const tr11 = center(modulesTotal - (m+4), m+3);
+	return {
+		W: sample(tl00.x, tl00.y, r), R: sample(tl10.x, tl10.y, r), G: sample(tl01.x, tl01.y, r), Y: sample(tl11.x, tl11.y, r),
+		K: sample(tr00.x, tr00.y, r), M: sample(tr10.x, tr10.y, r), C: sample(tr01.x, tr01.y, r), B: sample(tr11.x, tr11.y, r)
+	};
 }
 
