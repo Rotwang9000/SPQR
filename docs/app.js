@@ -2737,16 +2737,23 @@ function decodeSPQRLayers(imageData) {
 					console.log(`   Module [${my},${mx}]:`, { center: `(${cx},${cy})`, samples: samples.join(''), counts: colourCounts, final: moduleColour });
 				}
 				
-				// Map colour to layer bits
-				// WHITE (00): base=light, red=light
-				// RED   (01): base=light, red=dark
-				// GREEN (11): base=dark,  red=dark  (overlap)
-				// BLACK (10): base=dark,  red=light
-				const baseIsDark = (moduleColour === 'K' || moduleColour === 'G');
-				const redIsDark = (moduleColour === 'R' || moduleColour === 'G');
-				
-				baseRow.push(baseIsDark);
-				redRow.push(redIsDark);
+			// Map colour to layer bits
+			// WHITE (00): base=light, red=light
+			// RED   (01): base=light, red=dark
+			// GREEN (11): base=dark,  red=dark  (overlap)
+			// BLACK (10): base=dark,  red=light
+			const baseIsDark = (moduleColour === 'K' || moduleColour === 'G');
+			const redIsDark = (moduleColour === 'R' || moduleColour === 'G');
+			
+			baseRow.push(baseIsDark);
+			redRow.push(redIsDark);
+			
+			// Debug: also try inverted mapping
+			if (my === 0 && mx < 10) {
+				const baseInv = !baseIsDark;
+				const redInv = !redIsDark;
+				if (mx === 0) console.log('   Trying inverted mapping for comparison...');
+			}
 			}
 			
 			baseMods.push(baseRow);
@@ -2835,10 +2842,16 @@ function decodeSPQRLayers(imageData) {
 			}
 		};
 		
+		// Keep copies before enforcement for comparison
+		const baseModsRaw = baseMods.map(row => [...row]);
+		const redModsRaw = redMods.map(row => [...row]);
+		
 		enforceFinders(baseMods);
 		enforceFinders(redMods);
 		
+		console.log('   Base layer row 0 (raw  ):', baseModsRaw[0].map(b => b ? '█' : '·').join(''));
 		console.log('   Base layer row 0 (fixed):', baseMods[0].map(b => b ? '█' : '·').join(''));
+		console.log('   Red  layer row 0 (raw  ):', redModsRaw[0].map(b => b ? '█' : '·').join(''));
 		console.log('   Red  layer row 0 (fixed):', redMods[0].map(b => b ? '█' : '·').join(''));
 		
 		// Step 4: Use jsQR to decode each layer
@@ -2861,18 +2874,30 @@ function decodeSPQRLayers(imageData) {
 				}
 			}
 			
-			const result = jsQR(rgba, scaledSize, scaledSize);
-			if (result) {
-				console.log(`   ✅ ${layerName} decoded: "${result.data}"`);
-				return result.data;
-			} else {
-				console.log(`   ❌ ${layerName} decode failed`);
-				return null;
-			}
+		// Try multiple decoding strategies for maximum tolerance
+		let result = jsQR(rgba, scaledSize, scaledSize, { inversionAttempts: "attemptBoth" });
+		if (result) {
+			console.log(`   ✅ ${layerName} decoded: "${result.data}"`);
+			return result.data;
+		}
+		
+		// For short text (likely just "SPQR"), try without enforcing patterns
+		console.log(`   ⚠️  ${layerName} initial decode failed, trying without pattern enforcement...`);
+		return null;
 		};
 		
-		const baseText = decodeLayer(baseMods, 'Base layer');
-		const redText = decodeLayer(redMods, 'Red layer');
+		let baseText = decodeLayer(baseMods, 'Base layer');
+		let redText = decodeLayer(redMods, 'Red layer');
+		
+		// If enforcement failed, try raw data (for short text like "SPQR", raw might work better)
+		if (!baseText) {
+			console.log('   Retrying base layer without pattern enforcement...');
+			baseText = decodeLayer(baseModsRaw, 'Base layer (raw)');
+		}
+		if (!redText) {
+			console.log('   Retrying red layer without pattern enforcement...');
+			redText = decodeLayer(redModsRaw, 'Red layer (raw)');
+		}
 		
 		const combined = (baseText || '') + (redText || '');
 		
