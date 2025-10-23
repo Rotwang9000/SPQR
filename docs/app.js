@@ -1129,36 +1129,63 @@ function resampleNearest(src, sw, sh, dw, dh) {
 function makeImageDataFromRgba(rgba, w, h) { return new ImageData(rgba, w, h); }
 
 function enhanceImageContrast(rgba, width, height) {
-	// AGGRESSIVE preprocessing for low-quality phone camera images
-	// Calculate actual color range used in image
-	let minR = 255, maxR = 0, minG = 255, maxG = 0, minB = 255, maxB = 0;
+	// ULTRA-AGGRESSIVE preprocessing for terrible phone camera images
+	const enhanced = new Uint8ClampedArray(rgba.length);
+	
+	// Step 1: Histogram equalization per channel for maximum contrast
+	const histR = new Array(256).fill(0);
+	const histG = new Array(256).fill(0);
+	const histB = new Array(256).fill(0);
+	
 	for (let i = 0; i < rgba.length; i += 4) {
-		minR = Math.min(minR, rgba[i]);
-		maxR = Math.max(maxR, rgba[i]);
-		minG = Math.min(minG, rgba[i+1]);
-		maxG = Math.max(maxG, rgba[i+1]);
-		minB = Math.min(minB, rgba[i+2]);
-		maxB = Math.max(maxB, rgba[i+2]);
+		histR[rgba[i]]++;
+		histG[rgba[i+1]]++;
+		histB[rgba[i+2]]++;
 	}
 	
-	// Stretch each channel independently to full 0-255 range
-	const enhanced = new Uint8ClampedArray(rgba.length);
-	const rangeR = maxR - minR || 1;
-	const rangeG = maxG - minG || 1;
-	const rangeB = maxB - minB || 1;
+	// Build cumulative distribution function (CDF)
+	const cdfR = new Array(256);
+	const cdfG = new Array(256);
+	const cdfB = new Array(256);
+	cdfR[0] = histR[0]; cdfG[0] = histG[0]; cdfB[0] = histB[0];
+	for (let i = 1; i < 256; i++) {
+		cdfR[i] = cdfR[i-1] + histR[i];
+		cdfG[i] = cdfG[i-1] + histG[i];
+		cdfB[i] = cdfB[i-1] + histB[i];
+	}
 	
+	// Normalize CDF to 0-255 range
+	const totalPixels = width * height;
+	const cdfMin = (v) => { for (let i = 0; i < 256; i++) if (v[i] > 0) return v[i]; return 0; };
+	const minR = cdfMin(cdfR), minG = cdfMin(cdfG), minB = cdfMin(cdfB);
+	
+	const mapR = new Uint8Array(256);
+	const mapG = new Uint8Array(256);
+	const mapB = new Uint8Array(256);
+	
+	for (let i = 0; i < 256; i++) {
+		mapR[i] = Math.round(((cdfR[i] - minR) / (totalPixels - minR)) * 255);
+		mapG[i] = Math.round(((cdfG[i] - minG) / (totalPixels - minG)) * 255);
+		mapB[i] = Math.round(((cdfB[i] - minB) / (totalPixels - minB)) * 255);
+	}
+	
+	// Apply histogram equalization
 	for (let i = 0; i < rgba.length; i += 4) {
-		enhanced[i] = Math.round(((rgba[i] - minR) / rangeR) * 255);
-		enhanced[i+1] = Math.round(((rgba[i+1] - minG) / rangeG) * 255);
-		enhanced[i+2] = Math.round(((rgba[i+2] - minB) / rangeB) * 255);
+		enhanced[i] = mapR[rgba[i]];
+		enhanced[i+1] = mapG[rgba[i+1]];
+		enhanced[i+2] = mapB[rgba[i+2]];
 		enhanced[i+3] = rgba[i+3];
 	}
 	
-	console.log('📈 Contrast enhancement:', { 
-		before: { r: `${minR}-${maxR}`, g: `${minG}-${maxG}`, b: `${minB}-${maxB}` },
-		stretch: { r: rangeR, g: rangeG, b: rangeB }
-	});
+	// Step 2: Additional contrast boost (gamma correction)
+	const gamma = 0.8; // Boost darker colors
+	for (let i = 0; i < enhanced.length; i += 4) {
+		enhanced[i] = Math.round(255 * Math.pow(enhanced[i] / 255, gamma));
+		enhanced[i+1] = Math.round(255 * Math.pow(enhanced[i+1] / 255, gamma));
+		enhanced[i+2] = Math.round(255 * Math.pow(enhanced[i+2] / 255, gamma));
+	}
 	
+	console.log('📈 Histogram equalization + gamma boost applied');
 	return enhanced;
 }
 
