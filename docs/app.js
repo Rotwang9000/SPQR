@@ -1298,8 +1298,7 @@ function drawGridRect(ctx, x, y, w, h, color = '#ff9900') {
 }
 
 function sampleFinderRefsWithOrigin(rgba, width, height, modulePx, modulesTotal, marginModules, originX, originY) {
-	// Sample approximate finder inner squares for red/green/black references with absolute origin
-	// BWRG layout: TL=RED, TR=GREEN, BL=BLACK
+	// Sample approximate finder inner squares for color references with absolute origin
 	const sampleMean = (cx, cy, radius) => {
 		let r=0,g=0,b=0,c=0;
 		for (let y = Math.max(0, cy-radius); y < Math.min(height, cy+radius); y++) {
@@ -1324,10 +1323,47 @@ function sampleFinderRefsWithOrigin(rgba, width, height, modulePx, modulesTotal,
 	
 	// Sample center of inner 3x3 (at +3.5 modules from finder origin)
 	const innerOffset = 3.5 * modulePx;
-	const tl = sampleMean(tlFinderX + innerOffset, tlFinderY + innerOffset, Math.max(2, Math.floor(modulePx)));
-	const tr = sampleMean(trFinderX + innerOffset, trFinderY + innerOffset, Math.max(2, Math.floor(modulePx)));
-	const bl = sampleMean(blFinderX + innerOffset, blFinderY + innerOffset, Math.max(2, Math.floor(modulePx)));
-	return { type: 'BWRG', samples: { red: tl, green: tr, black: bl } };
+	const tlColor = sampleMean(tlFinderX + innerOffset, tlFinderY + innerOffset, Math.max(2, Math.floor(modulePx)));
+	const trColor = sampleMean(trFinderX + innerOffset, trFinderY + innerOffset, Math.max(2, Math.floor(modulePx)));
+	const blColor = sampleMean(blFinderX + innerOffset, blFinderY + innerOffset, Math.max(2, Math.floor(modulePx)));
+	
+	// Auto-identify colors by their characteristics (handles camera white balance, reflections, etc.)
+	const isBlackish = (c) => c.r < 80 && c.g < 80 && c.b < 80;
+	const isReddish = (c) => !isBlackish(c) && c.r > c.g && c.r > c.b;
+	const isGreenish = (c) => !isBlackish(c) && c.g >= c.r;
+	
+	let red, green, black;
+	const colors = [tlColor, trColor, blColor];
+	
+	// Find black first (darkest)
+	black = colors.reduce((darkest, c) => {
+		const brightness = c.r + c.g + c.b;
+		const darkBrightness = darkest.r + darkest.g + darkest.b;
+		return brightness < darkBrightness ? c : darkest;
+	});
+	
+	// Identify red and green from the remaining two
+	const remaining = colors.filter(c => c !== black);
+	if (remaining.length >= 2) {
+		const c1 = remaining[0], c2 = remaining[1];
+		// Prefer characteristic colors if they match
+		if (isReddish(c1) && isGreenish(c2)) {
+			red = c1; green = c2;
+		} else if (isGreenish(c1) && isReddish(c2)) {
+			green = c1; red = c2;
+		} else {
+			// Fallback: choose by R vs G channel dominance
+			red = (c1.r > c2.r) ? c1 : c2;
+			green = (c1.r > c2.r) ? c2 : c1;
+		}
+	} else {
+		// Shouldn't happen, but provide defaults
+		red = tlColor;
+		green = trColor;
+	}
+	
+	console.log('Finder sampling:', { tl: tlColor, tr: trColor, bl: blColor, identified: { red, green, black } });
+	return { type: 'BWRG', samples: { red, green, black } };
 }
 
 async function handleFileUpload(e) {
