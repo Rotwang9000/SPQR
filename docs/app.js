@@ -3312,22 +3312,31 @@ if (!baseText && !greenText && !redText) {
 	if (!baseText) greenText = decodeLayer(invertMods(greenMods), 'Green layer (inverted)');
 	if (!baseText && !greenText) redText = decodeLayer(invertMods(redMods), 'Red layer (inverted)');
 	
-	// NUCLEAR OPTION: jsQR bypass for short messages with parity
-	if (!baseText && !greenText && !redText && greenText !== null) {
-		console.log('🔥 NUCLEAR OPTION: Attempting CRC-only decode (bypassing Reed-Solomon)...');
-		// For very short messages (like "SPQR"), we can try brute-force CRC validation
-		// This is a last resort for severely degraded images
-		const tryBruteForce = (mods, layerName, expectedLength = 4) => {
-			// Extract raw data bits (QR v1 has specific data region)
-			// This is a simplified approach for 21x21 QR codes
-			console.log(`   Attempting brute-force decode of ${layerName}...`);
-			// TODO: Implement raw bit extraction and CRC validation
+	// NUCLEAR OPTION: jsQR bypass for short messages
+	if (!baseText && !greenText && !redText) {
+		console.log('🔥 NUCLEAR OPTION: Bypassing jsQR, extracting raw data for parity recovery...');
+		// Extract raw bit sequences - for QR v1-21, we know the data pattern positions
+		// We'll extract the sequences even if they're corrupt, then use parity to recover
+		const extractRawBits = (mods, layerName) => {
+			console.log(`   Extracting raw bits from ${layerName}...`);
+			// For 21x21 QR v1 with alphanumeric mode, data starts at specific positions
+			// This is a simplified extractor that reads the data codewords region
+			// Format: [mode bits][count bits][data bits][error correction bits]
+			
+			// QR v1 data region (simplified zigzag pattern, bottom-right to top-left)
+			const bits = [];
+			// TODO: Implement proper QR data extraction following the standard zigzag pattern
+			// For now, return null to skip
 			return null;
 		};
 		
-		baseText = tryBruteForce(baseMods, 'Base', 2);
-		greenText = tryBruteForce(greenMods, 'Green (parity)', 12);
-		redText = tryBruteForce(redMods, 'Red', 2);
+		const baseBits = extractRawBits(baseMods, 'Base');
+		const greenBits = extractRawBits(greenMods, 'Green (parity)');
+		const redBits = extractRawBits(redMods, 'Red');
+		
+		console.log(`   Raw bit extraction: base=${!!baseBits}, green=${!!greenBits}, red=${!!redBits}`);
+		// Even if we extracted bits, we'd need to implement QR decoding logic
+		// This is beyond our current scope - mark as TODO for future enhancement
 	}
 }
 	
