@@ -1257,7 +1257,7 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	return null;
 }
 
-function scanFromVideo() {
+async function scanFromVideo() {
 	const video = document.getElementById('video');
 	const canvas = document.getElementById('canvas');
 	const overlayCanvas = document.getElementById('overlay-canvas');
