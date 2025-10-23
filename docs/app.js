@@ -1128,16 +1128,54 @@ function resampleNearest(src, sw, sh, dw, dh) {
 
 function makeImageDataFromRgba(rgba, w, h) { return new ImageData(rgba, w, h); }
 
+function enhanceImageContrast(rgba, width, height) {
+	// AGGRESSIVE preprocessing for low-quality phone camera images
+	// Calculate actual color range used in image
+	let minR = 255, maxR = 0, minG = 255, maxG = 0, minB = 255, maxB = 0;
+	for (let i = 0; i < rgba.length; i += 4) {
+		minR = Math.min(minR, rgba[i]);
+		maxR = Math.max(maxR, rgba[i]);
+		minG = Math.min(minG, rgba[i+1]);
+		maxG = Math.max(maxG, rgba[i+1]);
+		minB = Math.min(minB, rgba[i+2]);
+		maxB = Math.max(maxB, rgba[i+2]);
+	}
+	
+	// Stretch each channel independently to full 0-255 range
+	const enhanced = new Uint8ClampedArray(rgba.length);
+	const rangeR = maxR - minR || 1;
+	const rangeG = maxG - minG || 1;
+	const rangeB = maxB - minB || 1;
+	
+	for (let i = 0; i < rgba.length; i += 4) {
+		enhanced[i] = Math.round(((rgba[i] - minR) / rangeR) * 255);
+		enhanced[i+1] = Math.round(((rgba[i+1] - minG) / rangeG) * 255);
+		enhanced[i+2] = Math.round(((rgba[i+2] - minB) / rangeB) * 255);
+		enhanced[i+3] = rgba[i+3];
+	}
+	
+	console.log('📈 Contrast enhancement:', { 
+		before: { r: `${minR}-${maxR}`, g: `${minG}-${maxG}`, b: `${minB}-${maxB}` },
+		stretch: { r: rangeR, g: rangeG, b: rangeB }
+	});
+	
+	return enhanced;
+}
+
 function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	// Crop ROI around QR, then scale to target module size for robust sampling
 	const roi = extractRoiFromGrid(imageData, grid, 1);
 	const modulesWithMargin = grid.qrModules + 8 + 2; // +2 for padding on each side already included
 	const dw = modulesWithMargin * targetModulePx;
 	const dh = modulesWithMargin * targetModulePx;
-	const scaled = resampleNearest(roi.rgba, roi.width, roi.height, dw, dh);
+	let scaled = resampleNearest(roi.rgba, roi.width, roi.height, dw, dh);
+	
+	// AGGRESSIVE PREPROCESSING: Enhance contrast (essential for phone camera images!)
+	scaled = enhanceImageContrast(scaled, dw, dh);
+	
 	const id = makeImageDataFromRgba(scaled, dw, dh);
 	
-	// Calibrate colors from finder patterns in the ROI before decoding
+	// Calibrate colors from finder patterns in the ROI AFTER enhancement
 	const originInROI = targetModulePx; // 1 module of padding
 	const finderSamples = sampleFinderRefsWithOrigin(id.data, dw, dh, targetModulePx, grid.qrModules, 1, originInROI, originInROI);
 	if (finderSamples) {
