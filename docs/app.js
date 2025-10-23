@@ -2626,6 +2626,13 @@ function decodeSPQRLayers(imageData) {
 		}
 		
 		console.log('   Using color palette:', window.bwrgColors ? 'CUSTOM' : (window.cameraCalibration ? 'CAMERA-CALIBRATED' : 'DEFAULT'));
+		if (window.cameraCalibration) {
+			console.log('   Calibrated:', { 
+				R: `rgb(${Math.round(paletteRgb.R.r)},${Math.round(paletteRgb.R.g)},${Math.round(paletteRgb.R.b)})`,
+				G: `rgb(${Math.round(paletteRgb.G.r)},${Math.round(paletteRgb.G.g)},${Math.round(paletteRgb.G.b)})`,
+				K: `rgb(${Math.round(paletteRgb.K.r)},${Math.round(paletteRgb.K.g)},${Math.round(paletteRgb.K.b)})`
+			});
+		}
 		
 		// Step 1: Classify pixels using improved color matching for lighting tolerance
 		const classifyPixel = (r, g, b) => {
@@ -2703,13 +2710,18 @@ function decodeSPQRLayers(imageData) {
 				
 				// Sample 3×3 pixels around centre for robustness
 				const samples = [];
+				const rgbSamples = []; // Debug: keep RGB values
 				for (let dy = -1; dy <= 1; dy++) {
 					for (let dx = -1; dx <= 1; dx++) {
 						const px = Math.max(0, Math.min(width - 1, cx + dx));
 						const py = Math.max(0, Math.min(height - 1, cy + dy));
 						const idx = (py * width + px) * 4;
-						const colour = classifyPixel(data[idx], data[idx + 1], data[idx + 2]);
+						const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+						const colour = classifyPixel(r, g, b);
 						samples.push(colour);
+						if (my === 0 && mx < 5) { // Debug first 5 modules of row 0
+							rgbSamples.push({ rgb: `(${r},${g},${b})`, class: colour });
+						}
 					}
 				}
 				
@@ -2719,6 +2731,11 @@ function decodeSPQRLayers(imageData) {
 				const moduleColour = Object.keys(colourCounts).reduce((a, b) => 
 					colourCounts[a] > colourCounts[b] ? a : b
 				);
+				
+				// Debug first few modules
+				if (my === 0 && mx < 5) {
+					console.log(`   Module [${my},${mx}]:`, { center: `(${cx},${cy})`, samples: samples.join(''), counts: colourCounts, final: moduleColour });
+				}
 				
 				// Map colour to layer bits
 				// WHITE (00): base=light, red=light
