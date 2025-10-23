@@ -1218,6 +1218,28 @@ function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 		console.log('Calibrated colors from finder patterns:', finderSamples);
 	}
 	
+	// TRY ZXING FIRST on the enhanced image (more robust than jsQR for degraded images!)
+	if (window.zxingCodeReader) {
+		try {
+			console.log('🔷 Trying ZXing on enhanced ROI...');
+			// Create a temporary canvas with the enhanced image
+			const tempCanvas = document.createElement('canvas');
+			tempCanvas.width = dw;
+			tempCanvas.height = dh;
+			const tempCtx = tempCanvas.getContext('2d');
+			tempCtx.putImageData(id, 0, 0);
+			
+			const zxingResult = await window.zxingCodeReader.decodeFromImageElement(tempCanvas);
+			if (zxingResult && zxingResult.getText()) {
+				console.log(`✅ ZXing decoded: "${zxingResult.getText()}"`);
+				window.cameraCalibration = null;
+				return { type: 'standard', text: zxingResult.getText() };
+			}
+		} catch (e) {
+			console.log('⚠️  ZXing failed, trying jsQR + SPQR layers...');
+		}
+	}
+	
 	// Provide a precise grid hint for ROI (origin at 1*targetModulePx padding)
 	window.currentGridHint = { modules: grid.qrModules, modulePx: targetModulePx, originX: targetModulePx, originY: targetModulePx };
 	// Try standard jsQR first on ROI
