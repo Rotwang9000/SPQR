@@ -3303,15 +3303,33 @@ function decodeCMYRGBLayers(imageData) {
 	let greenText = decodeLayer(greenMods, 'Green layer');
 	let redText = decodeLayer(redMods, 'Red layer');
 	
-	// AGGRESSIVE RECOVERY: If all layers failed, try with inverted bits
-	if (!baseText && !greenText && !redText) {
-		console.log('⚡ ALL layers failed jsQR - trying AGGRESSIVE bit inversion recovery...');
-		const invertMods = (mods) => mods.map(row => row.map(bit => !bit));
+// AGGRESSIVE RECOVERY: If all layers failed, try with inverted bits
+if (!baseText && !greenText && !redText) {
+	console.log('⚡ ALL layers failed jsQR - trying AGGRESSIVE bit inversion recovery...');
+	const invertMods = (mods) => mods.map(row => row.map(bit => !bit));
+	
+	baseText = decodeLayer(invertMods(baseMods), 'Base layer (inverted)');
+	if (!baseText) greenText = decodeLayer(invertMods(greenMods), 'Green layer (inverted)');
+	if (!baseText && !greenText) redText = decodeLayer(invertMods(redMods), 'Red layer (inverted)');
+	
+	// NUCLEAR OPTION: jsQR bypass for short messages with parity
+	if (!baseText && !greenText && !redText && greenText !== null) {
+		console.log('🔥 NUCLEAR OPTION: Attempting CRC-only decode (bypassing Reed-Solomon)...');
+		// For very short messages (like "SPQR"), we can try brute-force CRC validation
+		// This is a last resort for severely degraded images
+		const tryBruteForce = (mods, layerName, expectedLength = 4) => {
+			// Extract raw data bits (QR v1 has specific data region)
+			// This is a simplified approach for 21x21 QR codes
+			console.log(`   Attempting brute-force decode of ${layerName}...`);
+			// TODO: Implement raw bit extraction and CRC validation
+			return null;
+		};
 		
-		baseText = decodeLayer(invertMods(baseMods), 'Base layer (inverted)');
-		if (!baseText) greenText = decodeLayer(invertMods(greenMods), 'Green layer (inverted)');
-		if (!baseText && !greenText) redText = decodeLayer(invertMods(redMods), 'Red layer (inverted)');
+		baseText = tryBruteForce(baseMods, 'Base', 2);
+		greenText = tryBruteForce(greenMods, 'Green (parity)', 12);
+		redText = tryBruteForce(redMods, 'Red', 2);
 	}
+}
 	
 	// Check if this is parity mode (green layer starts with SPQRv1|)
 		let combined = null;
