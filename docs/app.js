@@ -1181,148 +1181,197 @@ function setupDownloadLink(elementId, content, mimeType) {
 }
 
 async function toggleCamera() {
-    const video = document.getElementById('video');
-    const btn = document.getElementById('cameraBtn');
-    const preview = document.getElementById('camera-preview');
-    const status = document.getElementById('scan-status');
-    
-    if (currentStream) {
-        // Stop camera
-        currentStream.getTracks().forEach(track => track.stop());
-        currentStream = null;
-        preview.style.display = 'none';
-        btn.textContent = '📷 Use Camera';
-    } else {
-        // Start camera
-        try {
-            status.textContent = 'Starting camera...';
-            preview.style.display = 'block';
-            
-            currentStream = await navigator.mediaDevices.getUserMedia({ 
-                video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
-            });
-            video.srcObject = currentStream;
-            await video.play(); // Wait for video to start playing
-            btn.textContent = '🛑 Stop Camera';
-            
-            status.textContent = '📷 Scanning... Point camera at QR code';
-            
-            // Start scanning
-            scanFromVideo();
-        } catch (error) {
-            console.error('Camera error:', error);
-            status.textContent = '❌ Camera error: ' + error.message;
-            setTimeout(() => preview.style.display = 'none', 3000);
-        }
-    }
+	const video = document.getElementById('video');
+	const btn = document.getElementById('cameraBtn');
+	const preview = document.getElementById('camera-preview');
+	const status = document.getElementById('scan-status');
+	
+	if (currentStream) {
+		// Stop camera
+		currentStream.getTracks().forEach(track => track.stop());
+		currentStream = null;
+		preview.style.display = 'none';
+		btn.textContent = '📷 Use Camera';
+	} else {
+		// Start camera
+		try {
+			status.textContent = 'Starting camera...';
+			preview.style.display = 'block';
+			
+			currentStream = await navigator.mediaDevices.getUserMedia({ 
+				video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
+			});
+			video.srcObject = currentStream;
+			await video.play(); // Wait for video to start playing
+			btn.textContent = '🛑 Stop Camera';
+			
+			status.textContent = '📷 Scanning... Point camera at QR code';
+			
+			// Start scanning
+			scanFromVideo();
+		} catch (error) {
+			console.error('Camera error:', error);
+			status.textContent = '❌ Camera error: ' + error.message;
+			setTimeout(() => preview.style.display = 'none', 3000);
+		}
+	}
 }
 
 let lastScanState = { found: false, decoded: false, lastUpdate: 0 };
+let lastDecodedText = null;
+let scanPauseUntil = 0;
 
 function scanFromVideo() {
-    const video = document.getElementById('video');
-    const canvas = document.getElementById('canvas');
-    const overlayCanvas = document.getElementById('overlay-canvas');
-    const status = document.getElementById('scan-status');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    const overlayCtx = overlayCanvas.getContext('2d');
-    
-    if (video.readyState === video.HAVE_ENOUGH_DATA) {
-        // Match canvas size to video
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        overlayCanvas.width = video.videoWidth;
-        overlayCanvas.height = video.videoHeight;
-        
-        ctx.imageSmoothingEnabled = false; // Preserve exact pixels for SPQR
-        ctx.drawImage(video, 0, 0);
-        
-        // Clear overlay
-        overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-        
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        
-        // Try standard QR detection first (faster and gives us location info)
-        const code = jsQR(imageData.data, imageData.width, imageData.height, {
-            inversionAttempts: "dontInvert"
-        });
-        
-        if (code) {
-            // Found QR structure! Draw detection box
-            drawDetectionBox(overlayCtx, code.location, '#00ff00');
-            
-            // Successfully decoded as standard QR
-            status.textContent = '✅ Standard QR found & decoded!';
-            status.style.background = 'rgba(0, 200, 0, 0.8)';
-            lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
-            
-            handleScannedCode(code.data);
-            return;
-        }
-        
-        // Try to find QR structure even if decode failed
-        const foundStructure = jsQR(imageData.data, imageData.width, imageData.height, {
-            inversionAttempts: "attemptBoth"
-        });
-        
-        if (foundStructure && foundStructure.location) {
-            // Found QR structure but couldn't decode - might be SPQR
-            drawDetectionBox(overlayCtx, foundStructure.location, '#ff9900');
-            status.textContent = '⚠️  QR structure found - trying SPQR decode...';
-            status.style.background = 'rgba(255, 153, 0, 0.8)';
-            lastScanState = { found: true, decoded: false, lastUpdate: Date.now() };
-            
-            // Try SPQR detection on this located area
-            const spqrResult = detectSPQR(imageData);
-            if (spqrResult && spqrResult.text) {
-                status.textContent = `✅ SPQR decoded! (${spqrResult.layers || '?'} layers)`;
-                status.style.background = 'rgba(0, 200, 0, 0.8)';
-                lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
-                
-                handleScannedCode(spqrResult.text);
-                return;
-            } else {
-                status.textContent = '❌ QR found but decode failed - try better lighting/focus';
-                status.style.background = 'rgba(200, 0, 0, 0.8)';
-            }
-        } else {
-            // No QR structure found at all
-            const now = Date.now();
-            if (now - lastScanState.lastUpdate > 500) {
-                status.textContent = '🔍 Searching for QR code...';
-                status.style.background = 'rgba(0, 0, 0, 0.7)';
-                lastScanState = { found: false, decoded: false, lastUpdate: now };
-            }
-        }
-    }
-    
-    if (currentStream) {
-        requestAnimationFrame(scanFromVideo);
-    }
+	const video = document.getElementById('video');
+	const canvas = document.getElementById('canvas');
+	const overlayCanvas = document.getElementById('overlay-canvas');
+	const status = document.getElementById('scan-status');
+	const ctx = canvas.getContext('2d', { willReadFrequently: true });
+	const overlayCtx = overlayCanvas.getContext('2d');
+	
+	if (video.readyState === video.HAVE_ENOUGH_DATA) {
+		// Match canvas size to video
+		canvas.width = video.videoWidth;
+		canvas.height = video.videoHeight;
+		overlayCanvas.width = video.videoWidth;
+		overlayCanvas.height = video.videoHeight;
+		
+		ctx.imageSmoothingEnabled = false; // Preserve exact pixels for SPQR
+		ctx.drawImage(video, 0, 0);
+		
+		// Clear overlay
+		overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+		
+		const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+		// Respect pause window after a success to avoid flicker / repeat triggers
+		const nowTs = Date.now();
+		if (nowTs < scanPauseUntil) {
+			requestAnimationFrame(scanFromVideo);
+			return;
+		}
+		
+		// Try standard QR detection first (fast and gives location)
+		const code = jsQR(imageData.data, imageData.width, imageData.height, {
+			inversionAttempts: "dontInvert"
+		});
+		
+		if (code && code.data) {
+			// Found QR structure! Draw detection box
+			drawDetectionBox(overlayCtx, code.location, '#00ff00');
+			
+			// Successfully decoded as standard QR
+			status.textContent = '✅ Standard QR found & decoded!';
+			status.style.background = 'rgba(0, 200, 0, 0.8)';
+			lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
+			
+			if (code.data !== lastDecodedText) {
+				lastDecodedText = code.data;
+				handleScannedCode(code.data);
+			}
+			// Pause briefly then continue scanning
+			scanPauseUntil = Date.now() + 1500;
+			requestAnimationFrame(scanFromVideo);
+			return;
+		}
+		
+		// No direct decode - try to locate structure using our finder analysis
+		const grid = locateQRStructure(imageData.data, imageData.width, imageData.height);
+		if (grid && grid.qrModules && grid.modulePx) {
+			// Found structure - show orange box
+			drawGridRect(overlayCtx, grid.originX, grid.originY, (grid.qrModules + 8) * grid.modulePx, (grid.qrModules + 8) * grid.modulePx, '#ff9900');
+			status.textContent = '⚠️  QR structure found - trying SPQR decode...';
+			status.style.background = 'rgba(255, 153, 0, 0.8)';
+			lastScanState = { found: true, decoded: false, lastUpdate: Date.now() };
+			
+			// Provide grid hint and palette calibration from finder refs for decoders
+			window.currentGridHint = { modules: grid.qrModules, modulePx: grid.modulePx, originX: grid.originX, originY: grid.originY };
+			window.cameraCalibration = sampleFinderRefsWithOrigin(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, 4, grid.originX, grid.originY);
+			
+			// Attempt SPQR decode on full image (decoder will use hint + calibration)
+			const spqrResult = detectSPQR(imageData);
+			if (spqrResult && spqrResult.text) {
+				status.textContent = `✅ SPQR decoded! (${spqrResult.layers || '?' } layers)`;
+				status.style.background = 'rgba(0, 200, 0, 0.8)';
+				lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
+				if (spqrResult.text !== lastDecodedText) {
+					lastDecodedText = spqrResult.text;
+					handleScannedCode(spqrResult.text);
+				}
+				// Pause briefly then continue scanning
+				scanPauseUntil = Date.now() + 1500;
+				requestAnimationFrame(scanFromVideo);
+				return;
+			} else {
+				status.textContent = '❌ QR found but decode failed - try better lighting/focus';
+				status.style.background = 'rgba(200, 0, 0, 0.8)';
+			}
+		} else {
+			// No QR structure found at all
+			const now = Date.now();
+			if (now - lastScanState.lastUpdate > 500) {
+				status.textContent = '🔍 Searching for QR code...';
+				status.style.background = 'rgba(0, 0, 0, 0.7)';
+				lastScanState = { found: false, decoded: false, lastUpdate: now };
+			}
+		}
+	}
+	
+	if (currentStream) {
+		requestAnimationFrame(scanFromVideo);
+	}
 }
 
 function drawDetectionBox(ctx, location, color = '#00ff00') {
-    if (!location) return;
-    
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(location.topLeftCorner.x, location.topLeftCorner.y);
-    ctx.lineTo(location.topRightCorner.x, location.topRightCorner.y);
-    ctx.lineTo(location.bottomRightCorner.x, location.bottomRightCorner.y);
-    ctx.lineTo(location.bottomLeftCorner.x, location.bottomLeftCorner.y);
-    ctx.closePath();
-    ctx.stroke();
-    
-    // Draw corner markers
-    const drawCorner = (x, y) => {
-        ctx.fillStyle = color;
-        ctx.fillRect(x - 6, y - 6, 12, 12);
-    };
-    drawCorner(location.topLeftCorner.x, location.topLeftCorner.y);
-    drawCorner(location.topRightCorner.x, location.topRightCorner.y);
-    drawCorner(location.bottomRightCorner.x, location.bottomRightCorner.y);
-    drawCorner(location.bottomLeftCorner.x, location.bottomLeftCorner.y);
+	if (!location) return;
+	
+	ctx.strokeStyle = color;
+	ctx.lineWidth = 4;
+	ctx.beginPath();
+	ctx.moveTo(location.topLeftCorner.x, location.topLeftCorner.y);
+	ctx.lineTo(location.topRightCorner.x, location.topRightCorner.y);
+	ctx.lineTo(location.bottomRightCorner.x, location.bottomRightCorner.y);
+	ctx.lineTo(location.bottomLeftCorner.x, location.bottomLeftCorner.y);
+	ctx.closePath();
+	ctx.stroke();
+	
+	// Draw corner markers
+	const drawCorner = (x, y) => {
+		ctx.fillStyle = color;
+		ctx.fillRect(x - 6, y - 6, 12, 12);
+	};
+	drawCorner(location.topLeftCorner.x, location.topLeftCorner.y);
+	drawCorner(location.topRightCorner.x, location.topRightCorner.y);
+	drawCorner(location.bottomRightCorner.x, location.bottomRightCorner.y);
+	drawCorner(location.bottomLeftCorner.x, location.bottomLeftCorner.y);
+}
+
+function drawGridRect(ctx, x, y, w, h, color = '#ff9900') {
+	ctx.strokeStyle = color;
+	ctx.lineWidth = 3;
+	ctx.strokeRect(Math.max(0,x), Math.max(0,y), Math.max(0,w), Math.max(0,h));
+}
+
+function sampleFinderRefsWithOrigin(rgba, width, height, modulePx, modulesTotal, marginModules, originX, originY) {
+	// Sample approximate finder inner squares for red/green/black references with absolute origin
+	const sampleMean = (cx, cy, radius) => {
+		let r=0,g=0,b=0,c=0;
+		for (let y = Math.max(0, cy-radius); y < Math.min(height, cy+radius); y++) {
+			for (let x = Math.max(0, cx-radius); x < Math.min(width, cx+radius); x++) {
+				const i = (y*width + x) * 4;
+				r += rgba[i];
+				g += rgba[i+1];
+				b += rgba[i+2];
+				c++;
+			}
+		}
+		return c ? { r: Math.round(r/c), g: Math.round(g/c), b: Math.round(b/c) } : { r:0,g:0,b:0 };
+	};
+	const innerCenterOffset = (marginModules + 3) * modulePx + Math.floor(modulePx/2);
+	const tl = sampleMean(originX + innerCenterOffset, originY + innerCenterOffset, Math.max(2, Math.floor(modulePx)));
+	const tr = sampleMean(originX + (modulesTotal - 7) * modulePx + Math.floor(modulePx/2), originY + innerCenterOffset, Math.max(2, Math.floor(modulePx)));
+	const bl = sampleMean(originX + innerCenterOffset, originY + (modulesTotal - 7) * modulePx + Math.floor(modulePx/2), Math.max(2, Math.floor(modulePx)));
+	return { type: 'BWRG', samples: { red: tl, green: tr, black: bl } };
 }
 
 async function handleFileUpload(e) {
@@ -2562,112 +2611,77 @@ function decodeSPQRLayers(imageData) {
 			return { r, g, b };
 		};
 		
-		const paletteRgb = {
+		let paletteRgb = {
 			'W': hexToRgb(palette[0]), // White
 			'R': hexToRgb(palette[1]), // Red
 			'G': hexToRgb(palette[2]), // Green
 			'K': hexToRgb(palette[3])  // Black
 		};
+		// Use camera calibration if available
+		if (window.cameraCalibration && window.cameraCalibration.type === 'BWRG' && window.cameraCalibration.samples) {
+			const s = window.cameraCalibration.samples;
+			paletteRgb = {
+				'W': paletteRgb.W,
+				'R': s.red || paletteRgb.R,
+				'G': s.green || paletteRgb.G,
+				'K': s.black || paletteRgb.K
+			};
+		}
 		
-		console.log('   Using color palette:', window.bwrgColors ? 'CUSTOM' : 'DEFAULT');
+		console.log('   Using color palette:', window.bwrgColors ? 'CUSTOM' : (window.cameraCalibration ? 'CAMERA-CALIBRATED' : 'DEFAULT'));
 		
 		// Step 1: Classify pixels using improved color matching for lighting tolerance
 		const classifyPixel = (r, g, b) => {
-			// BWRG: White, Black, Red, Green
-			// Normalise by brightness to handle reflections and lighting variations
 			const brightness = Math.max(r, g, b);
 			const minBright = Math.min(r, g, b);
-			
-			// Extremely bright or dark pixels - check value first
-			if (brightness > 230 && minBright > 200) return 'W'; // Very white
-			if (brightness < 60) return 'K'; // Very black
-			
-			// For coloured pixels, normalise by brightness and use colour ratios
-			// This makes us more tolerant to lighting variations and reflections
+			if (brightness > 230 && minBright > 200) return 'W';
+			if (brightness < 60) return 'K';
 			let minDist = Infinity;
 			let bestColor = 'W';
-			
 			for (const [colorName, rgb] of Object.entries(paletteRgb)) {
-				// Normalise both pixel and palette colour
 				const paletteBright = Math.max(rgb.r, rgb.g, rgb.b) || 1;
 				const pixelBright = brightness || 1;
-				
-				// Calculate distance using normalised ratios
 				const distR = Math.pow((r / pixelBright) - (rgb.r / paletteBright), 2);
 				const distG = Math.pow((g / pixelBright) - (rgb.g / paletteBright), 2);
 				const distB = Math.pow((b / pixelBright) - (rgb.b / paletteBright), 2);
 				const dist = Math.sqrt(distR + distG + distB);
-				
-				if (dist < minDist) {
-					minDist = dist;
-					bestColor = colorName;
-				}
+				if (dist < minDist) { minDist = dist; bestColor = colorName; }
 			}
-			
 			return bestColor;
 		};
-	
-	// Step 2: Detect grid structure from image dimensions
-	// SPQR images have: margin (4 modules) + QR data + margin (4 modules)
-	const margin = 4;
-	
-	let bestModules = 21;
-	let bestModulePx = width / (21 + 2 * margin);
-	let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
-	
-	// Search through valid QR versions (21, 25, 29, ... 177 modules)
-	// Collect all candidates with very good fit (remainder < 0.3 for camera tolerance)
-	const candidates = [];
-	
-	for (let testModules = 21; testModules <= 177; testModules += 4) {
-		const testModulePx = width / (testModules + 2 * margin);
-		const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
-		const roundedModulePx = Math.round(testModulePx);
 		
-		// Skip if pixels per module would be too small (< 2px)
-		if (roundedModulePx < 2) continue;
-		
-		// Collect candidates with good fit
-		if (testRemainder < 0.3) {
-			candidates.push({
-				modules: testModules,
-				modulePx: testModulePx,
-				remainder: testRemainder,
-				roundedPx: roundedModulePx
-			});
+		// Step 2: Detect grid structure from image dimensions (prefer camera hint)
+		const margin = 4;
+		let modules, modulePx;
+		if (window.currentGridHint && window.currentGridHint.modules && window.currentGridHint.modulePx) {
+			modules = window.currentGridHint.modules;
+			modulePx = window.currentGridHint.modulePx;
+			console.log(`   Grid (hint): ${modules}×${modules} modules, ${modulePx}px per module`);
+		} else {
+			let bestModules = 21;
+			let bestModulePx = width / (21 + 2 * margin);
+			let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
+			const candidates = [];
+			for (let testModules = 21; testModules <= 177; testModules += 4) {
+				const testModulePx = width / (testModules + 2 * margin);
+				const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
+				const roundedModulePx = Math.round(testModulePx);
+				if (roundedModulePx < 2) continue;
+				if (testRemainder < 0.3) {
+					candidates.push({ modules: testModules, modulePx: roundedModulePx, remainder: testRemainder });
+				}
+				if (testRemainder < bestRemainder) { bestRemainder = testRemainder; bestModulePx = testModulePx; bestModules = testModules; }
+			}
+			modules = bestModules; modulePx = Math.round(bestModulePx);
+			if (candidates.length > 0) {
+				candidates.sort((a,b)=>{
+					const aStd = (a.modulePx===5||a.modulePx===6), bStd=(b.modulePx===5||b.modulePx===6);
+					if (aStd && !bStd) return -1; if (!aStd && bStd) return 1; return a.remainder - b.remainder;
+				});
+				modules = candidates[0].modules; modulePx = candidates[0].modulePx;
+			}
+			console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module`);
 		}
-		
-		// Also track overall best
-		if (testRemainder < bestRemainder) {
-			bestRemainder = testRemainder;
-			bestModulePx = testModulePx;
-			bestModules = testModules;
-		}
-	}
-	
-	// If we have multiple good candidates, prefer smaller module counts
-	// (QR codes use the smallest version that fits the data)
-	let modules = bestModules;
-	let modulePx = Math.round(bestModulePx);
-	
-	if (candidates.length > 0) {
-		// Sort with priority: standard module sizes (5px BWRG, 6px CMYRGB), then best fit
-		candidates.sort((a, b) => {
-			const aIsStandard = (a.roundedPx === 5 || a.roundedPx === 6);
-			const bIsStandard = (b.roundedPx === 5 || b.roundedPx === 6);
-			
-			if (aIsStandard && !bIsStandard) return -1;
-			if (!aIsStandard && bIsStandard) return 1;
-			
-			// If both are standard, prefer exact fit (remainder=0) or smaller remainder
-			return a.remainder - b.remainder;
-		});
-		
-		modules = candidates[0].modules;
-		modulePx = candidates[0].roundedPx;
-	}
-	
-	console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module (remainder: ${bestRemainder.toFixed(3)})`);
 		
 		// Step 3: Sample each QR module and build binary layers
 		// In BWRG SPQR: BLACK → base layer, RED → red layer, GREEN → both layers
@@ -2718,95 +2732,95 @@ function decodeSPQRLayers(imageData) {
 			redMods.push(redRow);
 		}
 		
-	console.log('   Base layer row 0 (raw):', baseMods[0].map(b => b ? '█' : '·').join(''));
-	console.log('   Red  layer row 0 (raw):', redMods[0].map(b => b ? '█' : '·').join(''));
-	
-	// Step 3.5: Enforce finder and alignment patterns on BOTH layers
-	// Get alignment pattern positions for a given QR version
-	const getAlignmentPatternPositions = (version) => {
-		if (version === 1) return [];
-		// Alignment pattern center positions by version (from QR spec)
-		const positions = [
-			[], // Version 1
-			[6, 18], [6, 22], [6, 26], [6, 30], [6, 34], // Versions 2-6
-			[6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50], [6, 30, 54], [6, 32, 58], [6, 34, 62], // Versions 7-13
-			[6, 26, 46, 66], [6, 26, 48, 70], [6, 26, 50, 74], [6, 30, 54, 78], [6, 30, 56, 82], [6, 30, 58, 86], [6, 34, 62, 90], // Versions 14-20
-			[6, 28, 50, 72, 94], [6, 26, 50, 74, 98], [6, 30, 54, 78, 102], [6, 28, 54, 80, 106], [6, 32, 58, 84, 110], [6, 30, 58, 86, 114], [6, 34, 62, 90, 118], // Versions 21-27
-			[6, 26, 50, 74, 98, 122], [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130], [6, 30, 56, 82, 108, 134], [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142], [6, 34, 62, 90, 118, 146], // Versions 28-34
-			[6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154], [6, 28, 54, 80, 106, 132, 158], [6, 32, 58, 84, 110, 136, 162], [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170] // Versions 35-40
-		];
-		return positions[version - 1] || [];
-	};
-	
-	const enforceFinders = (mods) => {
-		const version = 1 + (modules - 21) / 4;
+		console.log('   Base layer row 0 (raw):', baseMods[0].map(b => b ? '█' : '·').join(''));
+		console.log('   Red  layer row 0 (raw):', redMods[0].map(b => b ? '█' : '·').join(''));
 		
-		// Draw finder patterns (7x7)
-		const drawFinder = (ox, oy) => {
-			for (let dy = 0; dy < 7; dy++) {
-				for (let dx = 0; dx < 7; dx++) {
-					const onBorder = (dx === 0 || dx === 6 || dy === 0 || dy === 6);
-					const inCenter = (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
-					const xx = ox + dx;
-					const yy = oy + dy;
-					if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
-						mods[yy][xx] = onBorder || inCenter;
+		// Step 3.5: Enforce finder and alignment patterns on BOTH layers
+		// Get alignment pattern positions for a given QR version
+		const getAlignmentPatternPositions = (version) => {
+			if (version === 1) return [];
+			// Alignment pattern center positions by version (from QR spec)
+			const positions = [
+				[], // Version 1
+				[6, 18], [6, 22], [6, 26], [6, 30], [6, 34], // Versions 2-6
+				[6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50], [6, 30, 54], [6, 32, 58], [6, 34, 62], // Versions 7-13
+				[6, 26, 46, 66], [6, 26, 48, 70], [6, 26, 50, 74], [6, 30, 54, 78], [6, 30, 56, 82], [6, 30, 58, 86], [6, 34, 62, 90], // Versions 14-20
+				[6, 28, 50, 72, 94], [6, 26, 50, 74, 98], [6, 30, 54, 78, 102], [6, 28, 54, 80, 106], [6, 32, 58, 84, 110], [6, 30, 58, 86, 114], [6, 34, 62, 90, 118], // Versions 21-27
+				[6, 26, 50, 74, 98, 122], [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130], [6, 30, 56, 82, 108, 134], [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142], [6, 34, 62, 90, 118, 146], // Versions 28-34
+				[6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154], [6, 28, 54, 80, 106, 132, 158], [6, 32, 58, 84, 110, 136, 162], [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170] // Versions 35-40
+			];
+			return positions[version - 1] || [];
+		};
+		
+		const enforceFinders = (mods) => {
+			const version = 1 + (modules - 21) / 4;
+			
+			// Draw finder patterns (7x7)
+			const drawFinder = (ox, oy) => {
+				for (let dy = 0; dy < 7; dy++) {
+					for (let dx = 0; dx < 7; dx++) {
+						const onBorder = (dx === 0 || dx === 6 || dy === 0 || dy === 6);
+						const inCenter = (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
+						const xx = ox + dx;
+						const yy = oy + dy;
+						if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
+							mods[yy][xx] = onBorder || inCenter;
+						}
+					}
+				}
+			};
+			drawFinder(0, 0);
+			drawFinder(modules - 7, 0);
+			drawFinder(0, modules - 7);
+			
+			// Draw alignment patterns (5x5)
+			const drawAlignment = (cx, cy) => {
+				for (let dy = -2; dy <= 2; dy++) {
+					for (let dx = -2; dx <= 2; dx++) {
+						const onBorder = (Math.abs(dx) === 2 || Math.abs(dy) === 2);
+						const inCenter = (dx === 0 && dy === 0);
+						const xx = cx + dx;
+						const yy = cy + dy;
+						if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
+							mods[yy][xx] = onBorder || inCenter;
+						}
+					}
+				}
+			};
+			
+			const alignmentPos = getAlignmentPatternPositions(version);
+			const inFinder = (x, y) => {
+				return (x < 9 && y < 9) || (x >= modules - 9 && y < 9) || (x < 9 && y >= modules - 9);
+			};
+			
+			// Draw alignment patterns at all position combinations, except where finders are
+			for (let i = 0; i < alignmentPos.length; i++) {
+				for (let j = 0; j < alignmentPos.length; j++) {
+					const x = alignmentPos[j];
+					const y = alignmentPos[i];
+					// Skip if overlaps with finder pattern
+					if (!inFinder(x, y)) {
+						drawAlignment(x, y);
 					}
 				}
 			}
-		};
-		drawFinder(0, 0);
-		drawFinder(modules - 7, 0);
-		drawFinder(0, modules - 7);
-		
-		// Draw alignment patterns (5x5)
-		const drawAlignment = (cx, cy) => {
-			for (let dy = -2; dy <= 2; dy++) {
-				for (let dx = -2; dx <= 2; dx++) {
-					const onBorder = (Math.abs(dx) === 2 || Math.abs(dy) === 2);
-					const inCenter = (dx === 0 && dy === 0);
-					const xx = cx + dx;
-					const yy = cy + dy;
-					if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
-						mods[yy][xx] = onBorder || inCenter;
-					}
-				}
+			
+			// Draw timing patterns
+			for (let x = 0; x < modules; x++) {
+				if (!inFinder(x, 6)) mods[6][x] = (x % 2) === 0;
+			}
+			for (let y = 0; y < modules; y++) {
+				if (!inFinder(6, y)) mods[y][6] = (y % 2) === 0;
 			}
 		};
 		
-		const alignmentPos = getAlignmentPatternPositions(version);
-		const inFinder = (x, y) => {
-			return (x < 9 && y < 9) || (x >= modules - 9 && y < 9) || (x < 9 && y >= modules - 9);
-		};
+		enforceFinders(baseMods);
+		enforceFinders(redMods);
 		
-		// Draw alignment patterns at all position combinations, except where finders are
-		for (let i = 0; i < alignmentPos.length; i++) {
-			for (let j = 0; j < alignmentPos.length; j++) {
-				const x = alignmentPos[j];
-				const y = alignmentPos[i];
-				// Skip if overlaps with finder pattern
-				if (!inFinder(x, y)) {
-					drawAlignment(x, y);
-				}
-			}
-		}
+		console.log('   Base layer row 0 (fixed):', baseMods[0].map(b => b ? '█' : '·').join(''));
+		console.log('   Red  layer row 0 (fixed):', redMods[0].map(b => b ? '█' : '·').join(''));
 		
-		// Draw timing patterns
-		for (let x = 0; x < modules; x++) {
-			if (!inFinder(x, 6)) mods[6][x] = (x % 2) === 0;
-		}
-		for (let y = 0; y < modules; y++) {
-			if (!inFinder(6, y)) mods[y][6] = (y % 2) === 0;
-		}
-	};
-	
-	enforceFinders(baseMods);
-	enforceFinders(redMods);
-	
-	console.log('   Base layer row 0 (fixed):', baseMods[0].map(b => b ? '█' : '·').join(''));
-	console.log('   Red  layer row 0 (fixed):', redMods[0].map(b => b ? '█' : '·').join(''));
-	
-	// Step 4: Use jsQR to decode each layer
+		// Step 4: Use jsQR to decode each layer
 		const decodeLayer = (mods, layerName) => {
 			// Scale up for jsQR (now has alignment patterns so moderate scale is fine)
 			const scale = 8;
