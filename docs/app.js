@@ -1197,7 +1197,7 @@ function enhanceImageContrast(rgba, width, height) {
 	return enhanced;
 }
 
-function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
+async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	// Crop ROI around QR, then scale to target module size for robust sampling
 	const roi = extractRoiFromGrid(imageData, grid, 1);
 	const modulesWithMargin = grid.qrModules + 8 + 2; // +2 for padding on each side already included
@@ -1481,7 +1481,7 @@ async function handleFileUpload(e) {
 			// Locate structure then crop + scale ROI
 			const grid = locateQRStructure(imageData.data, imageData.width, imageData.height);
 			if (grid) {
-				const roiResult = decodeFromGridROI(imageData, grid, 8);
+				const roiResult = await decodeFromGridROI(imageData, grid, 8);
 				if (roiResult) {
 					if (roiResult.type === 'standard') {
 						displayScanResult({ standard: roiResult.text, spqr: null });
