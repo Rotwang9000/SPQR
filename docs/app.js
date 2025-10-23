@@ -10,6 +10,14 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log('jsQR library loaded successfully');
     }
     
+    // Check ZXing availability
+    if (typeof ZXing !== 'undefined') {
+        console.log('✅ ZXing library loaded successfully - robust decoder available!');
+        window.zxingCodeReader = new ZXing.BrowserQRCodeReader();
+    } else {
+        console.warn('⚠️  ZXing library not loaded - will use jsQR only');
+    }
+    
 	if (typeof qrcode === 'undefined') {
 		console.error('QR generation library failed to load!');
 		alert('QR generation library failed to load. Please refresh the page.');
@@ -3287,15 +3295,38 @@ function decodeCMYRGBLayers(imageData) {
 				}
 			}
 			
-			// Try with different inversion modes
-			const result = jsQR(rgba, scaledSize, scaledSize, { inversionAttempts: "attemptBoth" });
-			if (result && result.data) {
-				console.log(`   ✅ ${layerName} (scale ${scale}px): "${result.data}"`);
-				return result.data;
+			// Try jsQR first (fast)
+			const jsqrResult = jsQR(rgba, scaledSize, scaledSize, { inversionAttempts: "attemptBoth" });
+			if (jsqrResult && jsqrResult.data) {
+				console.log(`   ✅ ${layerName} (jsQR @ ${scale}px): "${jsqrResult.data}"`);
+				return jsqrResult.data;
+			}
+			
+			// Try ZXing if available (more robust)
+			if (window.zxingCodeReader && scale === 8) { // Only try ZXing at optimal scale
+				try {
+					const imageData = new ImageData(new Uint8ClampedArray(rgba), scaledSize, scaledSize);
+					const luminances = new Uint8ClampedArray(scaledSize * scaledSize);
+					for (let i = 0; i < scaledSize * scaledSize; i++) {
+						luminances[i] = rgba[i * 4]; // Use R channel (all channels are same for B&W)
+					}
+					const binaryBitmap = new ZXing.BinaryBitmap(
+						new ZXing.HybridBinarizer(
+							new ZXing.RGBLuminanceSource(luminances, scaledSize, scaledSize)
+						)
+					);
+					const zxingResult = new ZXing.QRCodeReader().decode(binaryBitmap);
+					if (zxingResult && zxingResult.getText()) {
+						console.log(`   ✅ ${layerName} (ZXing @ ${scale}px): "${zxingResult.getText()}"`);
+						return zxingResult.getText();
+					}
+				} catch (e) {
+					// ZXing failed, continue to next scale
+				}
 			}
 		}
 		
-		console.log(`   ❌ ${layerName} failed (tried ${scales.length} scales)`);
+		console.log(`   ❌ ${layerName} failed (tried jsQR + ZXing)`);
 		return null;
 	};
 		
