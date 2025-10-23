@@ -504,192 +504,144 @@ function estimateGrid(mask, width, height) {
 
 // Locate QR structure directly from colored SPQR image
 function locateQRStructure(data, width, height) {
-    console.log(`locateQRStructure: ${width}x${height} image`);
-    // Consider any non-white pixel as part of QR structure
-    const isQRPixel = (x, y) => {
-        const i = (y * width + x) * 4;
-        const r = data[i], g = data[i+1], b = data[i+2];
-        return r < 240 || g < 240 || b < 240;
-    };
-    
-    const finderCandidates = [];
-    
-    // Scan horizontal lines for 1:1:3:1:1 patterns
-    for (let y = 0; y < height; y += Math.max(1, Math.floor(height/40))) {
-        const runs = [];
-        let lastWasQR = false;
-        let runLength = 0;
-        
-        for (let x = 0; x <= width; x++) {
-            const isQR = x < width ? isQRPixel(x, y) : false;
-            
-            if (x === 0) {
-                lastWasQR = isQR;
-                runLength = 1;
-                continue;
-            }
-            
-            if (isQR === lastWasQR && x < width) {
-                runLength++;
-            } else {
-                runs.push({ dark: lastWasQR, length: runLength, endX: x - 1 });
-                lastWasQR = isQR;
-                runLength = 1;
-            }
-        }
-        
-        // Look for 1:1:3:1:1 pattern in runs
-        for (let i = 2; i < runs.length - 2; i++) {
-            const [r1, r2, r3, r4, r5] = [runs[i-2], runs[i-1], runs[i], runs[i+1], runs[i+2]];
-            
-            if (r1.dark && !r2.dark && r3.dark && !r4.dark && r5.dark) {
-                const [l1, l2, l3, l4, l5] = [r1.length, r2.length, r3.length, r4.length, r5.length];
-                const total = l1 + l2 + l3 + l4 + l5;
-                
-                if (total >= 15) {
-                    const ratios = [l1, l2, l3, l4, l5].map(len => len / total);
-                    
-                    // Check for approximate 1:1:3:1:1 ratios
-                    if (Math.abs(ratios[0] - 0.14) < 0.08 && 
-                        Math.abs(ratios[1] - 0.14) < 0.08 && 
-                        Math.abs(ratios[2] - 0.43) < 0.15 && 
-                        Math.abs(ratios[3] - 0.14) < 0.08 && 
-                        Math.abs(ratios[4] - 0.14) < 0.08) {
-                        
-                        const centerX = r1.endX - l1 + 1 + l1 + l2 + Math.floor(l3/2);
-                        const modulePx = Math.max(3, Math.round(l3 / 3));
-                        
-                        finderCandidates.push({ x: centerX, y, modulePx, strength: total });
-                    }
-                }
-            }
-        }
-    }
-    
-    // Scan vertical lines for 1:1:3:1:1 patterns
-    for (let x = 0; x < width; x += Math.max(1, Math.floor(width/40))) {
-        const runs = [];
-        let lastWasQR = false;
-        let runLength = 0;
-        
-        for (let y = 0; y <= height; y++) {
-            const isQR = y < height ? isQRPixel(x, y) : false;
-            
-            if (y === 0) {
-                lastWasQR = isQR;
-                runLength = 1;
-                continue;
-            }
-            
-            if (isQR === lastWasQR && y < height) {
-                runLength++;
-            } else {
-                runs.push({ dark: lastWasQR, length: runLength, endY: y - 1 });
-                lastWasQR = isQR;
-                runLength = 1;
-            }
-        }
-        
-        // Look for 1:1:3:1:1 pattern in runs
-        for (let i = 2; i < runs.length - 2; i++) {
-            const [r1, r2, r3, r4, r5] = [runs[i-2], runs[i-1], runs[i], runs[i+1], runs[i+2]];
-            
-            if (r1.dark && !r2.dark && r3.dark && !r4.dark && r5.dark) {
-                const [l1, l2, l3, l4, l5] = [r1.length, r2.length, r3.length, r4.length, r5.length];
-                const total = l1 + l2 + l3 + l4 + l5;
-                
-                if (total >= 15) {
-                    const ratios = [l1, l2, l3, l4, l5].map(len => len / total);
-                    
-                    // Check for approximate 1:1:3:1:1 ratios
-                    if (Math.abs(ratios[0] - 0.14) < 0.08 && 
-                        Math.abs(ratios[1] - 0.14) < 0.08 && 
-                        Math.abs(ratios[2] - 0.43) < 0.15 && 
-                        Math.abs(ratios[3] - 0.14) < 0.08 && 
-                        Math.abs(ratios[4] - 0.14) < 0.08) {
-                        
-                        const centerY = r1.endY - l1 + 1 + l1 + l2 + Math.floor(l3/2);
-                        const modulePx = Math.max(3, Math.round(l3 / 3));
-                        
-                        finderCandidates.push({ x, y: centerY, modulePx, strength: total });
-                    }
-                }
-            }
-        }
-    }
-    
-    if (finderCandidates.length < 6) {
-        console.log(`Found only ${finderCandidates.length} finder candidates, need at least 6`);
-        return null;
-    }
-    
-    // Cluster candidates into 3 finder locations
-    const avgModulePx = finderCandidates.reduce((sum, c) => sum + c.modulePx, 0) / finderCandidates.length;
-    const clusters = [];
-    
-    for (const candidate of finderCandidates) {
-        let foundCluster = false;
-        for (const cluster of clusters) {
-            const dx = candidate.x - cluster.x;
-            const dy = candidate.y - cluster.y;
-            const distance = Math.sqrt(dx*dx + dy*dy);
-            
-            if (distance < avgModulePx * 5) { // Within 5 modules
-                cluster.x = (cluster.x * cluster.count + candidate.x) / (cluster.count + 1);
-                cluster.y = (cluster.y * cluster.count + candidate.y) / (cluster.count + 1);
-                cluster.strength += candidate.strength;
-                cluster.count++;
-                foundCluster = true;
-                break;
-            }
-        }
-        
-        if (!foundCluster) {
-            clusters.push({
-                x: candidate.x,
-                y: candidate.y,
-                strength: candidate.strength,
-                count: 1
-            });
-        }
-    }
-    
-    // Sort by strength and take top 3
-    clusters.sort((a, b) => b.strength - a.strength);
-    const finders = clusters.slice(0, 3);
-    
-    if (finders.length < 3) {
-        console.log(`Found only ${finders.length} finder clusters, need 3`);
-        return null;
-    }
-    
-    // Calculate QR version from finder spacing
-    const minX = Math.min(...finders.map(f => f.x));
-    const maxX = Math.max(...finders.map(f => f.x));
-    const minY = Math.min(...finders.map(f => f.y));
-    const maxY = Math.max(...finders.map(f => f.y));
-    const qrWidth = maxX - minX;
-    const qrHeight = maxY - minY;
-    const avgQrSize = (qrWidth + qrHeight) / 2;
-    const modulePx = Math.round(avgModulePx);
-    // Finder centres are at module coordinates (3,3), (modules-4,3), (3,modules-4)
-    // So spacing between centres ≈ (modules - 7) modules.
-    const modulesEstimate = Math.round(avgQrSize / modulePx) + 7;
-    const estimatedVersion = Math.max(1, Math.round((modulesEstimate - 17) / 4));
-    const qrModules = 17 + 4 * estimatedVersion;
-    // Quiet zone is 4 modules. Origin is top-left of entire QR including quiet zone.
-    const originX = Math.round(minX - 7 * modulePx);
-    const originY = Math.round(minY - 7 * modulePx);
-    
-    console.log(`QR analysis: finder spacing ${avgQrSize.toFixed(1)}px → ${qrModules} modules → version ${estimatedVersion} (${qrModules}×${qrModules})`);
-    
-    return {
-        finders,
-        modulePx,
-        qrModules,
-        originX: Math.max(0, originX),
-        originY: Math.max(0, originY)
-    };
+	console.log(`locateQRStructure: ${width}x${height} image`);
+	// Pre-normalise: approximate white-balance and contrast stretch for robustness
+	// Compute global average of brightest channel to estimate illumination
+	let sumBright = 0, count = 0;
+	for (let i = 0; i < data.length; i += 20) {
+		const r = data[i], g = data[i+1], b = data[i+2];
+		sumBright += Math.max(r,g,b);
+		count++;
+	}
+	const avgBright = Math.max(80, Math.min(220, Math.round(sumBright / Math.max(1,count))));
+	const gain = avgBright > 0 ? 180 / avgBright : 1.0; // target around 180 mid-brightness
+	
+	// Consider any non-white pixel as part of QR structure with tolerance
+	const isQRPixel = (x, y) => {
+		const i = (y * width + x) * 4;
+		// Apply simple gain
+		let r = Math.min(255, Math.round(data[i] * gain));
+		let g = Math.min(255, Math.round(data[i+1] * gain));
+		let b = Math.min(255, Math.round(data[i+2] * gain));
+		// Compute brightness and chroma
+		const maxc = Math.max(r,g,b), minc = Math.min(r,g,b);
+		const brightness = maxc; // 0..255
+		const chroma = maxc - minc; // 0..255
+		// Treat near-white as background; anything with enough chroma or dark counts as QR
+		if (brightness > 235 && chroma < 12) return false; // near-white
+		if (brightness < 60) return true; // dark
+		return chroma > 10; // coloured/darker content
+	};
+	
+	const finderCandidates = [];
+	
+	// Scan horizontal lines for 1:1:3:1:1 patterns
+	for (let y = 0; y < height; y += Math.max(1, Math.floor(height/40))) {
+		const runs = [];
+		let lastWasQR = false;
+		let runLength = 0;
+		
+		for (let x = 0; x <= width; x++) {
+			const isQR = x < width ? isQRPixel(x, y) : false;
+			if (x === 0) { lastWasQR = isQR; runLength = 1; continue; }
+			if (isQR === lastWasQR && x < width) { runLength++; }
+			else { runs.push({ dark: lastWasQR, length: runLength, endX: x - 1 }); lastWasQR = isQR; runLength = 1; }
+		}
+		
+		for (let i = 2; i < runs.length - 2; i++) {
+			const [r1, r2, r3, r4, r5] = [runs[i-2], runs[i-1], runs[i], runs[i+1], runs[i+2]];
+			if (r1.dark && !r2.dark && r3.dark && !r4.dark && r5.dark) {
+				const [l1, l2, l3, l4, l5] = [r1.length, r2.length, r3.length, r4.length, r5.length];
+				const total = l1 + l2 + l3 + l4 + l5;
+				if (total >= 12) {
+					const ratios = [l1, l2, l3, l4, l5].map(len => len / total);
+					if (Math.abs(ratios[0] - 0.14) < 0.10 && Math.abs(ratios[1] - 0.14) < 0.10 && Math.abs(ratios[2] - 0.43) < 0.18 && Math.abs(ratios[3] - 0.14) < 0.10 && Math.abs(ratios[4] - 0.14) < 0.10) {
+						const centerX = r1.endX - l1 + 1 + l1 + l2 + Math.floor(l3/2);
+						const modulePx = Math.max(3, Math.round(l3 / 3));
+						finderCandidates.push({ x: centerX, y, modulePx, strength: total });
+					}
+				}
+			}
+		}
+	}
+	
+	// Scan vertical lines for 1:1:3:1:1 patterns
+	for (let x = 0; x < width; x += Math.max(1, Math.floor(width/40))) {
+		const runs = [];
+		let lastWasQR = false;
+		let runLength = 0;
+		for (let y = 0; y <= height; y++) {
+			const isQR = y < height ? isQRPixel(x, y) : false;
+			if (y === 0) { lastWasQR = isQR; runLength = 1; continue; }
+			if (isQR === lastWasQR && y < height) { runLength++; }
+			else { runs.push({ dark: lastWasQR, length: runLength, endY: y - 1 }); lastWasQR = isQR; runLength = 1; }
+		}
+		for (let i = 2; i < runs.length - 2; i++) {
+			const [r1, r2, r3, r4, r5] = [runs[i-2], runs[i-1], runs[i], runs[i+1], runs[i+2]];
+			if (r1.dark && !r2.dark && r3.dark && !r4.dark && r5.dark) {
+				const [l1, l2, l3, l4, l5] = [r1.length, r2.length, r3.length, r4.length, r5.length];
+				const total = l1 + l2 + l3 + l4 + l5;
+				if (total >= 12) {
+					const ratios = [l1, l2, l3, l4, l5].map(len => len / total);
+					if (Math.abs(ratios[0] - 0.14) < 0.10 && Math.abs(ratios[1] - 0.14) < 0.10 && Math.abs(ratios[2] - 0.43) < 0.18 && Math.abs(ratios[3] - 0.14) < 0.10 && Math.abs(ratios[4] - 0.14) < 0.10) {
+						const centerY = r1.endY - l1 + 1 + l1 + l2 + Math.floor(l3/2);
+						const modulePx = Math.max(3, Math.round(l3 / 3));
+						finderCandidates.push({ x, y: centerY, modulePx, strength: total });
+					}
+				}
+			}
+		}
+	}
+	
+	if (finderCandidates.length < 6) {
+		console.log(`Found only ${finderCandidates.length} finder candidates, need at least 6`);
+		return null;
+	}
+	
+	// Cluster candidates into 3 finder locations
+	const avgModulePx = finderCandidates.reduce((sum, c) => sum + c.modulePx, 0) / finderCandidates.length;
+	const clusters = [];
+	for (const candidate of finderCandidates) {
+		let foundCluster = false;
+		for (const cluster of clusters) {
+			const dx = candidate.x - cluster.x;
+			const dy = candidate.y - cluster.y;
+			const distance = Math.sqrt(dx*dx + dy*dy);
+			if (distance < avgModulePx * 5) {
+				cluster.x = (cluster.x * cluster.count + candidate.x) / (cluster.count + 1);
+				cluster.y = (cluster.y * cluster.count + candidate.y) / (cluster.count + 1);
+				cluster.strength += candidate.strength;
+				cluster.count++;
+				foundCluster = true;
+				break;
+			}
+		}
+		if (!foundCluster) {
+			clusters.push({ x: candidate.x, y: candidate.y, strength: candidate.strength, count: 1 });
+		}
+	}
+	clusters.sort((a, b) => b.strength - a.strength);
+	const finders = clusters.slice(0, 3);
+	if (finders.length < 3) {
+		console.log(`Found only ${finders.length} finder clusters, need 3`);
+		return null;
+	}
+	
+	const minX = Math.min(...finders.map(f => f.x));
+	const maxX = Math.max(...finders.map(f => f.x));
+	const minY = Math.min(...finders.map(f => f.y));
+	const maxY = Math.max(...finders.map(f => f.y));
+	const qrWidth = maxX - minX;
+	const qrHeight = maxY - minY;
+	const avgQrSize = (qrWidth + qrHeight) / 2;
+	const modulePx = Math.round(avgModulePx);
+	const modulesEstimate = Math.round(avgQrSize / modulePx) + 7;
+	const estimatedVersion = Math.max(1, Math.round((modulesEstimate - 17) / 4));
+	const qrModules = 17 + 4 * estimatedVersion;
+	const originX = Math.round(minX - 7 * modulePx);
+	const originY = Math.round(minY - 7 * modulePx);
+	console.log(`QR analysis: finder spacing ${avgQrSize.toFixed(1)}px → ${qrModules} modules → version ${estimatedVersion} (${qrModules}×${qrModules})`);
+	return { finders, modulePx, qrModules, originX: Math.max(0, originX), originY: Math.max(0, originY) };
 }
 
 // Simple run-length based finder locator fallback
@@ -1230,11 +1182,14 @@ function scanFromVideo() {
 	const overlayCtx = overlayCanvas.getContext('2d');
 	
 	if (video.readyState === video.HAVE_ENOUGH_DATA) {
-		// Match canvas size to video
+		// Match canvas size to video source
 		canvas.width = video.videoWidth;
 		canvas.height = video.videoHeight;
 		overlayCanvas.width = video.videoWidth;
 		overlayCanvas.height = video.videoHeight;
+		// Match overlay display size to displayed video size for correct overlay alignment
+		overlayCanvas.style.width = video.clientWidth + 'px';
+		overlayCanvas.style.height = video.clientHeight + 'px';
 		
 		ctx.imageSmoothingEnabled = false; // Preserve exact pixels for SPQR
 		ctx.drawImage(video, 0, 0);
@@ -1243,7 +1198,7 @@ function scanFromVideo() {
 		overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 		
 		const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
+		
 		// Respect pause window after a success to avoid flicker / repeat triggers
 		const nowTs = Date.now();
 		if (nowTs < scanPauseUntil) {
