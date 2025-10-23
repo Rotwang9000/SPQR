@@ -1092,6 +1092,76 @@ let lastScanState = { found: false, decoded: false, lastUpdate: 0 };
 let lastDecodedText = null;
 let scanPauseUntil = 0;
 
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+function extractRoiFromGrid(imageData, grid, paddingModules = 1) {
+	const { data, width, height } = imageData;
+	const padPx = paddingModules * grid.modulePx;
+	const x0 = clamp(grid.originX - padPx, 0, width);
+	const y0 = clamp(grid.originY - padPx, 0, height);
+	const sizePx = (grid.qrModules + 8) * grid.modulePx + 2 * padPx;
+	const w = clamp(sizePx, 1, width - x0);
+	const h = clamp(sizePx, 1, height - y0);
+	const rgba = new Uint8ClampedArray(w * h * 4);
+	for (let y = 0; y < h; y++) {
+		const srcY = y0 + y;
+		const srcOff = (srcY * width + x0) * 4;
+		const dstOff = y * w * 4;
+		rgba.set(data.subarray(srcOff, srcOff + w * 4), dstOff);
+	}
+	return { rgba, width: w, height: h, offsetX: x0, offsetY: y0, paddingPx: padPx };
+}
+
+function resampleNearest(src, sw, sh, dw, dh) {
+	const dst = new Uint8ClampedArray(dw * dh * 4);
+	for (let y = 0; y < dh; y++) {
+		const sy = Math.min(sh - 1, Math.floor(y * sh / dh));
+		for (let x = 0; x < dw; x++) {
+			const sx = Math.min(sw - 1, Math.floor(x * sw / dw));
+			const si = (sy * sw + sx) * 4;
+			const di = (y * dw + x) * 4;
+			dst[di] = src[si]; dst[di+1] = src[si+1]; dst[di+2] = src[si+2]; dst[di+3] = 255;
+		}
+	}
+	return dst;
+}
+
+function makeImageDataFromRgba(rgba, w, h) { return new ImageData(rgba, w, h); }
+
+function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
+	// Crop ROI around QR, then scale to target module size for robust sampling
+	const roi = extractRoiFromGrid(imageData, grid, 1);
+	const modulesWithMargin = grid.qrModules + 8 + 2; // +2 for padding on each side already included
+	const dw = modulesWithMargin * targetModulePx;
+	const dh = modulesWithMargin * targetModulePx;
+	const scaled = resampleNearest(roi.rgba, roi.width, roi.height, dw, dh);
+	const id = makeImageDataFromRgba(scaled, dw, dh);
+	
+	// Calibrate colors from finder patterns in the ROI before decoding
+	const originInROI = targetModulePx; // 1 module of padding
+	const finderSamples = sampleFinderRefsWithOrigin(id.data, dw, dh, targetModulePx, grid.qrModules, 1, originInROI, originInROI);
+	if (finderSamples) {
+		window.cameraCalibration = finderSamples;
+		console.log('Calibrated colors from finder patterns:', finderSamples);
+	}
+	
+	// Provide a precise grid hint for ROI (origin at 1*targetModulePx padding)
+	window.currentGridHint = { modules: grid.qrModules, modulePx: targetModulePx, originX: targetModulePx, originY: targetModulePx };
+	// Try standard jsQR first on ROI
+	const std = jsQR(id.data, id.width, id.height, { inversionAttempts: "attemptBoth" });
+	if (std && std.data) {
+		window.cameraCalibration = null; // Clear after use
+		return { type: 'standard', text: std.data };
+	}
+	// Try SPQR detection on ROI
+	const sp = detectSPQR(id);
+	window.cameraCalibration = null; // Clear after use
+	if (sp && sp.text) {
+		return { type: 'spqr', text: sp.text, layers: sp.layers };
+	}
+	return null;
+}
+
 function scanFromVideo() {
 	const video = document.getElementById('video');
 	const canvas = document.getElementById('canvas');
@@ -1250,70 +1320,49 @@ function sampleFinderRefsWithOrigin(rgba, width, height, modulePx, modulesTotal,
 }
 
 async function handleFileUpload(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    
-    try {
-        // First try to decode using jsQR client-side
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        const img = new Image();
-        
-        img.onload = function() {
-			console.log('Image loaded:', img.width, 'x', img.height);
-			
-			// For SPQR/color images, preserve exact pixel structure - don't scale!
-			// Scaling breaks the module grid alignment and color sampling
-			canvas.width = img.width;
-			canvas.height = img.height;
-			ctx.imageSmoothingEnabled = false;
-			ctx.drawImage(img, 0, 0);
-            
-            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            console.log('Scanning image data:', imageData.width, 'x', imageData.height);
-            
-            // Check if jsQR is available
-            if (typeof jsQR === 'undefined') {
-                console.error('jsQR library not loaded!');
-                displayScanResult({ 
-                    standard: null, 
-                    spqr: { base: null, red: null, combined: null } 
-                });
-                return;
-            }
-            
-            const code = jsQR(imageData.data, imageData.width, imageData.height);
-            console.log('jsQR result:', code);
-            
-            if (code) {
-                console.log('QR code found:', code.data);
-                // Standard QR code detected
-                displayScanResult({ standard: code.data, spqr: null });
-            } else {
-                console.log('No standard QR detected by jsQR, checking for SPQR...');
-                // Try to detect SPQR by looking for color patterns
-                const spqrResult = detectSPQR(imageData);
-                if (spqrResult) {
-                    displayScanResult({ standard: null, spqr: spqrResult });
-                } else {
-                    displayScanResult({ 
-                        standard: null, 
-                        spqr: { base: null, red: null, combined: null } 
-                    });
-                }
-            }
-        };
-        
-        img.onerror = function() {
-            alert('Error loading image file');
-        };
-        
-        img.src = URL.createObjectURL(file);
-        
-    } catch (error) {
-        console.error('Upload error:', error);
-        alert('Error processing image: ' + error.message);
-    }
+	const file = e.target.files[0];
+	if (!file) return;
+	try {
+		const canvas = document.getElementById('canvas');
+		const ctx = canvas.getContext('2d', { willReadFrequently: true });
+		const img = new Image();
+		img.onload = function() {
+			canvas.width = img.width; canvas.height = img.height;
+			ctx.imageSmoothingEnabled = false; ctx.drawImage(img, 0, 0);
+			const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+			// Standard first
+			const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+			if (code && code.data) {
+				displayScanResult({ standard: code.data, spqr: null });
+				return;
+			}
+			// Locate structure then crop + scale ROI
+			const grid = locateQRStructure(imageData.data, imageData.width, imageData.height);
+			if (grid) {
+				const roiResult = decodeFromGridROI(imageData, grid, 8);
+				if (roiResult) {
+					if (roiResult.type === 'standard') {
+						displayScanResult({ standard: roiResult.text, spqr: null });
+					} else {
+						displayScanResult({ standard: null, spqr: { base: roiResult.text, red: null, combined: roiResult.text } });
+					}
+					return;
+				}
+			}
+			// Fallback: SPQR detect full image
+			const spqrResult = detectSPQR(imageData);
+			if (spqrResult) {
+				displayScanResult({ standard: null, spqr: spqrResult });
+			} else {
+				displayScanResult({ standard: null, spqr: { base: null, red: null, combined: null } });
+			}
+		};
+		img.onerror = function() { alert('Error loading image file'); };
+		img.src = URL.createObjectURL(file);
+	} catch (error) {
+		console.error('Upload error:', error);
+		alert('Error processing image: ' + error.message);
+	}
 }
 
 function detectSPQR(imageData) {
@@ -1321,38 +1370,53 @@ function detectSPQR(imageData) {
     
     console.log(`SPQR detection starting: ${width}x${height} image`);
     
-    // First, detect if this has color patterns and count colored pixels
-    let coloredPixels = 0;
-    let totalPixels = 0;
+    // Check if we have a grid hint from ROI extraction
+    let modules, modulePx, margin, originX, originY;
+    let hasGridHint = false;
+    let savedGridHint = null;
     
-    // Quick scan to check if there are colors
-    for (let i = 0; i < data.length; i += 16) { // Sample every 4th pixel
-        const r = data[i];
-        const g = data[i + 1];
-        const b = data[i + 2];
+    if (window.currentGridHint && window.currentGridHint.modules && window.currentGridHint.modulePx) {
+        modules = window.currentGridHint.modules;
+        modulePx = window.currentGridHint.modulePx;
+        originX = window.currentGridHint.originX || modulePx;
+        originY = window.currentGridHint.originY || modulePx;
+        margin = Math.round(originX / modulePx); // Calculate margin from origin
+        hasGridHint = true;
+        savedGridHint = { ...window.currentGridHint }; // Save for decoders
+        console.log(`  Using grid hint: ${modules}×${modules}, ${modulePx}px/module, origin=(${originX},${originY})`);
+        // Don't clear yet - decoders will need it
+        window.currentGridHint = null;
+    } else {
+        // First, detect if this has color patterns and count colored pixels
+        let coloredPixels = 0;
+        let totalPixels = 0;
         
-        totalPixels++;
-        
-        // Check if not black or white
-        const isBlack = r < 50 && g < 50 && b < 50;
-        const isWhite = r > 200 && g > 200 && b > 200;
-        if (!isBlack && !isWhite) {
-            coloredPixels++;
+        // Quick scan to check if there are colors
+        for (let i = 0; i < data.length; i += 16) { // Sample every 4th pixel
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            
+            totalPixels++;
+            
+            // Check if not black or white
+            const isBlack = r < 50 && g < 50 && b < 50;
+            const isWhite = r > 200 && g > 200 && b > 200;
+            if (!isBlack && !isWhite) {
+                coloredPixels++;
+            }
         }
-    }
-    
-    const colorPercentage = coloredPixels / totalPixels;
-    console.log(`  Color ratio: ${colorPercentage.toFixed(3)} (${coloredPixels} colored pixels)`);
-    
-    // If we have significant color content, determine BWRG vs CMYRGB by checking finder patterns
-    // Lower threshold for camera images which may have compression artifacts
-    if (colorPercentage > 0.005) { // More than 0.5% colored pixels
-        // BWRG has SOLID colors in finder centers (3x3 module area)
-        // CMYRGB has 2x2 GRID of colors in finder centers
-        // Sample the top-left finder center to check
+        
+        const colorPercentage = coloredPixels / totalPixels;
+        console.log(`  Color ratio: ${colorPercentage.toFixed(3)} (${coloredPixels} colored pixels)`);
+        
+        // If we don't have significant color content, return null early
+        if (colorPercentage <= 0.005) {
+            return null;
+        }
         
         // Estimate grid parameters
-        const margin = 4; // Standard margin
+        margin = 4; // Standard margin
         
         // Find best grid match
         let bestModules = 21;
@@ -1383,8 +1447,8 @@ function detectSPQR(imageData) {
             }
         }
         
-        let modules = bestModules;
-        let modulePx = Math.round(bestModulePx);
+        modules = bestModules;
+        modulePx = Math.round(bestModulePx);
         
         if (candidates.length > 0) {
             candidates.sort((a, b) => {
@@ -1402,7 +1466,14 @@ function detectSPQR(imageData) {
             modulePx = candidates[0].modulePx;
         }
         
+        originX = margin * modulePx;
+        originY = margin * modulePx;
+        
         console.log(`  Estimated grid: ${modules}×${modules}, ${modulePx}px/module`);
+    }
+    
+    // Now check if this has color patterns (BWRG vs CMYRGB detection)
+    if (hasGridHint) { // If we have a grid hint, we know it's colored
         
         // Sample the TL finder center (the 3×3 inner square of the finder)
         // BWRG: solid color in all 9 modules
@@ -1413,8 +1484,8 @@ function detectSPQR(imageData) {
         for (let my = 2; my <= 4; my++) {
             for (let mx = 2; mx <= 4; mx++) {
                 // Calculate pixel position at the CENTER of this module
-                const px = Math.round((margin + mx + 0.5) * modulePx);
-                const py = Math.round((margin + my + 0.5) * modulePx);
+                const px = Math.round(originX + (mx + 0.5) * modulePx);
+                const py = Math.round(originY + (my + 0.5) * modulePx);
                 
                 if (px >= 0 && px < width && py >= 0 && py < height) {
                     const idx = (py * width + px) * 4;
@@ -1455,9 +1526,13 @@ function detectSPQR(imageData) {
         // BWRG has solid color (1-2 colors due to sampling noise)
         if (uniqueColors >= 3) {
             console.log('CMYRGB (8-color, 3-layer) SPQR detected');
+            // Restore grid hint for decoder
+            if (savedGridHint) window.currentGridHint = savedGridHint;
             return decodeCMYRGBLayers(imageData);
         } else {
             console.log('BWRG (4-color, 2-layer) SPQR detected');
+            // Restore grid hint for decoder
+            if (savedGridHint) window.currentGridHint = savedGridHint;
             return decodeSPQRLayers(imageData);
         }
     }
@@ -2526,12 +2601,17 @@ function decodeSPQRLayers(imageData) {
 		};
 		
 		// Step 2: Detect grid structure from image dimensions (prefer camera hint)
-		const margin = 4;
-		let modules, modulePx;
+		let margin = 4;
+		let modules, modulePx, originX, originY;
 		if (window.currentGridHint && window.currentGridHint.modules && window.currentGridHint.modulePx) {
 			modules = window.currentGridHint.modules;
 			modulePx = window.currentGridHint.modulePx;
-			console.log(`   Grid (hint): ${modules}×${modules} modules, ${modulePx}px per module`);
+			originX = window.currentGridHint.originX || (margin * modulePx);
+			originY = window.currentGridHint.originY || (margin * modulePx);
+			margin = Math.round(originX / modulePx); // Recalculate margin from origin
+			console.log(`   Grid (hint): ${modules}×${modules} modules, ${modulePx}px per module, origin=(${originX},${originY})`);
+			// Clear hint after using
+			window.currentGridHint = null;
 		} else {
 			let bestModules = 21;
 			let bestModulePx = width / (21 + 2 * margin);
@@ -2555,6 +2635,8 @@ function decodeSPQRLayers(imageData) {
 				});
 				modules = candidates[0].modules; modulePx = candidates[0].modulePx;
 			}
+			originX = margin * modulePx;
+			originY = margin * modulePx;
 			console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module`);
 		}
 		
@@ -2568,9 +2650,9 @@ function decodeSPQRLayers(imageData) {
 			const redRow = [];
 			
 			for (let mx = 0; mx < modules; mx++) {
-				// Sample from centre of module (including margin offset)
-				const cx = Math.round((margin + mx + 0.5) * modulePx);
-				const cy = Math.round((margin + my + 0.5) * modulePx);
+				// Sample from centre of module (using origin offset)
+				const cx = Math.round(originX + (mx + 0.5) * modulePx);
+				const cy = Math.round(originY + (my + 0.5) * modulePx);
 				
 				// Sample 3×3 pixels around centre for robustness
 				const samples = [];
@@ -2823,25 +2905,35 @@ function decodeCMYRGBLayers(imageData) {
 			return bestColor;
 		};
 	
-	// Step 2: Detect grid structure
-	// Try to find the QR grid that best fits the image dimensions
-	const margin = 4;
+	// Step 2: Detect grid structure (prefer camera/ROI hint)
+	let margin = 4;
+	let modules, modulePx, originX, originY;
 	
-	let bestModules = 21;
-	let bestModulePx = width / (21 + 2 * margin);
-	let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
-	
-	// Search through valid QR versions (21, 25, 29, ... 177 modules)
-	// Collect all candidates with very good fit (remainder < 0.3 for camera tolerance)
-	const candidates = [];
-	
-	for (let testModules = 21; testModules <= 177; testModules += 4) {
-		const testModulePx = width / (testModules + 2 * margin);
-		const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
-		const roundedModulePx = Math.round(testModulePx);
+	if (window.currentGridHint && window.currentGridHint.modules && window.currentGridHint.modulePx) {
+		modules = window.currentGridHint.modules;
+		modulePx = window.currentGridHint.modulePx;
+		originX = window.currentGridHint.originX || (margin * modulePx);
+		originY = window.currentGridHint.originY || (margin * modulePx);
+		margin = Math.round(originX / modulePx); // Recalculate margin from origin
+		console.log(`   Grid (hint): ${modules}×${modules} modules, ${modulePx}px per module, origin=(${originX},${originY})`);
+		// Clear hint after using
+		window.currentGridHint = null;
+	} else {
+		let bestModules = 21;
+		let bestModulePx = width / (21 + 2 * margin);
+		let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
 		
-		// Skip if pixels per module would be too small (< 2px)
-		if (roundedModulePx < 2) continue;
+		// Search through valid QR versions (21, 25, 29, ... 177 modules)
+		// Collect all candidates with very good fit (remainder < 0.3 for camera tolerance)
+		const candidates = [];
+		
+		for (let testModules = 21; testModules <= 177; testModules += 4) {
+			const testModulePx = width / (testModules + 2 * margin);
+			const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
+			const roundedModulePx = Math.round(testModulePx);
+			
+			// Skip if pixels per module would be too small (< 2px)
+			if (roundedModulePx < 2) continue;
 		
 		// Collect candidates with good fit
 		if (testRemainder < 0.3) {
@@ -2882,8 +2974,10 @@ function decodeCMYRGBLayers(imageData) {
 		modules = candidates[0].modules;
 		modulePx = candidates[0].roundedPx;
 	}
-		
+		originX = margin * modulePx;
+		originY = margin * modulePx;
 		console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module`);
+	}
 		
 		// Step 3: Sample modules and decompose into 3 layers
 		// Note: Despite names, these map to baseQr, greenQr, redQr in the generator
@@ -2897,8 +2991,8 @@ function decodeCMYRGBLayers(imageData) {
 			const redRow = [];
 			
 			for (let mx = 0; mx < modules; mx++) {
-				const cx = Math.round((margin + mx + 0.5) * modulePx);
-				const cy = Math.round((margin + my + 0.5) * modulePx);
+				const cx = Math.round(originX + (mx + 0.5) * modulePx);
+				const cy = Math.round(originY + (my + 0.5) * modulePx);
 				
 				// Sample 3×3 for robustness
 				const samples = [];
