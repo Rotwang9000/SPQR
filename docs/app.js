@@ -1468,7 +1468,7 @@ async function handleFileUpload(e) {
 		const canvas = document.getElementById('canvas');
 		const ctx = canvas.getContext('2d', { willReadFrequently: true });
 		const img = new Image();
-		img.onload = function() {
+		img.onload = async function() {
 			canvas.width = img.width; canvas.height = img.height;
 			ctx.imageSmoothingEnabled = false; ctx.drawImage(img, 0, 0);
 			const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
