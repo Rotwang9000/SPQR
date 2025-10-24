@@ -3607,12 +3607,14 @@ if (!baseText && !greenText && !redText) {
 	if (baseBits && greenBits && redBits && baseBits.length === greenBits.length && greenBits.length === redBits.length) {
 		console.log(`🔥 PARITY MAGIC: Attempting raw bit-level recovery...`);
 		
-		// Try decoding each layer's bits
-		const decodeBits = (bits, name) => {
-			try {
-				// Extract mode (first 4 bits)
-				const mode = (bits[0] << 3) | (bits[1] << 2) | (bits[2] << 1) | bits[3];
-				if (mode === 0b0010) { // Alphanumeric = 0010
+	// Try decoding each layer's bits
+	const decodeBits = (bits, name) => {
+		try {
+			// Extract mode (first 4 bits)
+			const mode = (bits[0] << 3) | (bits[1] << 2) | (bits[2] << 1) | bits[3];
+			console.log(`      ${name}: mode bits = ${bits.slice(0,4).join('')}, mode = 0b${mode.toString(2).padStart(4,'0')}`);
+			
+			if (mode === 0b0010) { // Alphanumeric = 0010
 					// Character count (next 9 bits for version 1)
 					let count = 0;
 					for (let i = 4; i < 13; i++) count = (count << 1) | bits[i];
@@ -3651,14 +3653,16 @@ if (!baseText && !greenText && !redText) {
 						}
 						text += String.fromCharCode(byte);
 					}
-					console.log(`      ${name} decoded: "${text}" (${text.length} chars)`);
-					return text;
-				}
-			} catch (e) {
-				console.log(`      ${name} decode failed:`, e.message);
+				console.log(`      ${name} decoded: "${text}" (${text.length} chars)`);
+				return text;
+			} else {
+				console.log(`      ${name}: unknown mode 0b${mode.toString(2).padStart(4,'0')}, cannot decode`);
 			}
-			return null;
-		};
+		} catch (e) {
+			console.log(`      ${name} decode failed:`, e.message);
+		}
+		return null;
+	};
 		
 		const baseDecoded = decodeBits(baseBits, 'Base');
 		const greenDecoded = decodeBits(greenBits, 'Green');
