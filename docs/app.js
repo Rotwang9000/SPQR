@@ -624,22 +624,44 @@ function locateQRStructure(data, width, height) {
 	}
 	
 	clusters.sort((a, b) => b.strength - a.strength);
-	const finders = clusters.slice(0, 3);
-	
-	if (finders.length < 3) {
+
+	// Select three DISTINCT finder clusters with adequate separation
+	const candidates = clusters;
+	const selected = [];
+	let minSep = avgModulePx * 4;
+	for (const c of candidates) {
+		if (selected.every(s => Math.hypot(c.x - s.x, c.y - s.y) > minSep)) {
+			selected.push(c);
+			if (selected.length === 3) break;
+		}
+	}
+	// If we didn't get 3, relax the separation threshold and try again
+	if (selected.length < 3) {
+		minSep = avgModulePx * 2.5;
+		for (const c of candidates) {
+			if (selected.includes(c)) continue;
+			if (selected.every(s => Math.hypot(c.x - s.x, c.y - s.y) > minSep)) {
+				selected.push(c);
+				if (selected.length === 3) break;
+			}
+		}
+	}
+
+	if (selected.length < 3) {
 		console.log(`⚠️  Found only ${finders.length} finder clusters, need 3`);
 		return null;
 	}
-	
-	// Identify TL, TR, BL by geometry
-	// TL has smallest x+y, TR has largest x-y, BL has largest y-x
+
+	// Identify TL, TR, BL by geometry from distinct clusters
+	// TL = smallest (x+y); TR = largest (x-y); BL = largest (y-x)
 	const scoreTL = f => f.x + f.y;
 	const scoreTR = f => f.x - f.y;
 	const scoreBL = f => f.y - f.x;
-	
-	const TL = [...finders].sort((a, b) => scoreTL(a) - scoreTL(b))[0];
-	const TR = [...finders].sort((a, b) => scoreTR(b) - scoreTR(a))[0];
-	const BL = [...finders].sort((a, b) => scoreBL(b) - scoreBL(a))[0];
+	const TL = selected.reduce((best, f) => (scoreTL(f) < scoreTL(best) ? f : best), selected[0]);
+	const remainingAfterTL = selected.filter(f => f !== TL);
+	const TR = remainingAfterTL.reduce((best, f) => (scoreTR(f) > scoreTR(best) ? f : best), remainingAfterTL[0]);
+	const remainingAfterTR = remainingAfterTL.filter(f => f !== TR);
+	const BL = remainingAfterTR.reduce((best, f) => (scoreBL(f) > scoreBL(best) ? f : best), remainingAfterTR[0]);
 	
 	console.log(`   Finders: TL(${Math.round(TL.x)},${Math.round(TL.y)}) TR(${Math.round(TR.x)},${Math.round(TR.y)}) BL(${Math.round(BL.x)},${Math.round(BL.y)})`);
 	
@@ -3166,7 +3188,13 @@ function decodeCMYRGBLayers(imageData) {
 			'B': hexToRgb(palette[7])  // Blue
 		};
 		
-		console.log('   Using color palette:', window.cmyrgbColors ? 'CUSTOM' : 'DEFAULT');
+		// Prefer camera-derived calibration if present (from ROI finder sampling)
+		if (window.cameraCalibrationCMY && window.cameraCalibrationCMY.W) {
+			console.log('   Using camera-calibrated CMYRGB palette');
+			Object.assign(paletteRgb, window.cameraCalibrationCMY);
+		} else {
+			console.log('   Using color palette:', window.cmyrgbColors ? 'CUSTOM' : 'DEFAULT');
+		}
 		
 		// Step 1: Classify pixels using improved color matching for lighting tolerance
 		const classifyPixel = (r, g, b) => {
