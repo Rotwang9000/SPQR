@@ -3224,10 +3224,11 @@ function decodeCMYRGBLayers(imageData) {
 		
 		// Prefer camera-derived calibration if present (from ROI finder sampling)
 		if (window.cameraCalibrationCMY && window.cameraCalibrationCMY.W) {
-			console.log('   Using camera-calibrated CMYRGB palette');
+			console.log('   Using camera-calibrated CMYRGB palette:', JSON.stringify(window.cameraCalibrationCMY, null, 2));
 			Object.assign(paletteRgb, window.cameraCalibrationCMY);
 		} else {
 			console.log('   Using color palette:', window.cmyrgbColors ? 'CUSTOM' : 'DEFAULT');
+			console.log('   Palette values:', JSON.stringify(paletteRgb, null, 2));
 		}
 		
 		// Step 1: Classify pixels using improved color matching for lighting tolerance
@@ -3404,12 +3405,25 @@ function decodeCMYRGBLayers(imageData) {
 		console.log(`   Color distribution:`, colorCounts);
 		if (modules === 21) {
 			const centerModule = Math.floor(modules / 2);
-			console.log(`   DEBUG center module (${centerModule},${centerModule}):`);
-			console.log(`      Base=${baseMods[centerModule][centerModule]}, Green=${greenMods[centerModule][centerModule]}, Red=${redMods[centerModule][centerModule]}`);
 			
-			// Sample the finder patterns to see what colors they have
-			console.log(`   DEBUG TL finder (3,3): Base=${baseMods[3][3]}, Green=${greenMods[3][3]}, Red=${redMods[3][3]}`);
-			console.log(`   DEBUG TR finder (${modules-4},3): Base=${baseMods[3][modules-4]}, Green=${greenMods[3][modules-4]}, Red=${redMods[3][modules-4]}`);
+			// Sample actual RGB values from a few key locations
+			const sampleRGB = (mx, my) => {
+				const cx = Math.round(originX + (mx + 0.5) * modulePx);
+				const cy = Math.round(originY + (my + 0.5) * modulePx);
+				const idx = (cy * width + cx) * 4;
+				return `RGB(${data[idx]},${data[idx+1]},${data[idx+2]})`;
+			};
+			
+			console.log(`   DEBUG sample RGB values:`);
+			console.log(`      Center (10,10): ${sampleRGB(10,10)}`);
+			console.log(`      TL finder (3,3): ${sampleRGB(3,3)}`);
+			console.log(`      TR inner (${modules-4},3): ${sampleRGB(modules-4,3)}`);
+			console.log(`      Data area (12,12): ${sampleRGB(12,12)}`);
+			
+			console.log(`   DEBUG bit values:`);
+			console.log(`      Center (10,10): Base=${baseMods[centerModule][centerModule]}, Green=${greenMods[centerModule][centerModule]}, Red=${redMods[centerModule][centerModule]}`);
+			console.log(`      TL finder (3,3): Base=${baseMods[3][3]}, Green=${greenMods[3][3]}, Red=${redMods[3][3]}`);
+			console.log(`      TR inner (${modules-4},3): Base=${baseMods[3][modules-4]}, Green=${greenMods[3][modules-4]}, Red=${redMods[3][modules-4]}`);
 		}
 		
 		// Step 4: Enforce finders on all layers
