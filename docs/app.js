@@ -1363,6 +1363,16 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 		window.cameraCalibration = finderSamples;
 		console.log('Calibrated colors from finder patterns:', finderSamples);
 	}
+	// Also calibrate CMYRGB palette from ROI finders (for 3-layer decoding)
+	try {
+		const cmyCal = sampleCMYRGBFinderPalette(id.data, dw, dh, targetModulePx, grid.qrModules, originInROI, originInROI);
+		if (cmyCal && cmyCal.W) {
+			window.cameraCalibrationCMY = cmyCal;
+			console.log('Calibrated CMYRGB palette from ROI finders:', cmyCal);
+		}
+	} catch (e) {
+		// ignore calibration errors
+	}
 	
 	// TRY ZXING FIRST on the enhanced image (more robust than jsQR for degraded images!)
 	if (window.zxingCodeReader) {
