@@ -3354,6 +3354,7 @@ function decodeCMYRGBLayers(imageData) {
 		const baseMods = [];    // bit 2 in encoding
 		const greenMods = [];   // bit 1 in encoding
 		const redMods = [];     // bit 0 in encoding
+		const colorCounts = {}; // Track color distribution for debugging
 		
 		for (let my = 0; my < modules; my++) {
 			const baseRow = [];
@@ -3376,12 +3377,13 @@ function decodeCMYRGBLayers(imageData) {
 					}
 				}
 				
-				// Majority vote
-				const counts = {};
-				samples.forEach(c => counts[c] = (counts[c] || 0) + 1);
-				const majorityColor = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
-				
-				// Generator uses: code = (b<<2) | (g<<1) | r
+			// Majority vote
+			const counts = {};
+			samples.forEach(c => counts[c] = (counts[c] || 0) + 1);
+			const majorityColor = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
+			colorCounts[majorityColor] = (colorCounts[majorityColor] || 0) + 1;
+			
+			// Generator uses: code = (b<<2) | (g<<1) | r
 				// where b=baseQr(bit2), g=greenQr(bit1), r=redQr(bit0)
 				// Palette: W=000, R=001, G=010, Y=011, K=100, M=101, C=110, B=111
 				const bBit = ['K', 'M', 'C', 'B'].includes(majorityColor); // bit 2
@@ -3396,6 +3398,18 @@ function decodeCMYRGBLayers(imageData) {
 			baseMods.push(baseRow);
 			greenMods.push(greenRow);
 			redMods.push(redRow);
+		}
+		
+		// DEBUG: Log color distribution across all modules
+		console.log(`   Color distribution:`, colorCounts);
+		if (modules === 21) {
+			const centerModule = Math.floor(modules / 2);
+			console.log(`   DEBUG center module (${centerModule},${centerModule}):`);
+			console.log(`      Base=${baseMods[centerModule][centerModule]}, Green=${greenMods[centerModule][centerModule]}, Red=${redMods[centerModule][centerModule]}`);
+			
+			// Sample the finder patterns to see what colors they have
+			console.log(`   DEBUG TL finder (3,3): Base=${baseMods[3][3]}, Green=${greenMods[3][3]}, Red=${redMods[3][3]}`);
+			console.log(`   DEBUG TR finder (${modules-4},3): Base=${baseMods[3][modules-4]}, Green=${greenMods[3][modules-4]}, Red=${redMods[3][modules-4]}`);
 		}
 		
 		// Step 4: Enforce finders on all layers
