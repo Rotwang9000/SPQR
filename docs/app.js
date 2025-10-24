@@ -1219,8 +1219,22 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	const dh = modulesWithMargin * targetModulePx;
 	let scaled = resampleNearest(roi.rgba, roi.width, roi.height, dw, dh);
 	
-	// AGGRESSIVE PREPROCESSING: Enhance contrast (essential for phone camera images!)
-	scaled = enhanceImageContrast(scaled, dw, dh);
+	// AGGRESSIVE PREPROCESSING: Only enhance if image looks degraded!
+	// Check if the image has good contrast already (clean generated codes don't need enhancement)
+	let minVal = 255, maxVal = 0;
+	for (let i = 0; i < scaled.length; i += 4) {
+		const val = Math.max(scaled[i], scaled[i+1], scaled[i+2]);
+		if (val < minVal) minVal = val;
+		if (val > maxVal) maxVal = val;
+	}
+	const contrast = maxVal - minVal;
+	if (contrast < 200) {
+		// Low contrast - probably a degraded/washed out image, apply aggressive enhancement
+		console.log(`📈 Low contrast (${contrast}) - applying histogram equalization...`);
+		scaled = enhanceImageContrast(scaled, dw, dh);
+	} else {
+		console.log(`✅ Good contrast (${contrast}) - skipping enhancement`);
+	}
 	
 	const id = makeImageDataFromRgba(scaled, dw, dh);
 	
