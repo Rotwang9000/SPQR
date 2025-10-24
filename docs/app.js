@@ -564,11 +564,25 @@ function locateQRStructure(data, width, height) {
 	let modulesEst = Math.max(21, 4*Math.round((Math.round((modulesEstimateFromX+modulesEstimateFromY)/2) - 17)/4) + 17);
 	modulePx = Math.max(3, Math.round(((spacingX + spacingY) / 2) / (modulesEst - 7)));
 	// Origin is TL outer quiet zone: TL inner centre is at (margin+3, margin+3) modules from origin, with margin=4
-	const originX = Math.round(TL.x - (4+3)*modulePx);
-	const originY = Math.round(TL.y - (4+3)*modulePx);
+	let originX = Math.round(TL.x - (4+3)*modulePx);
+	let originY = Math.round(TL.y - (4+3)*modulePx);
+	
+	// Sanity check: origin should never be negative or wildly off
+	// If it is, recalculate using the actual detected grid size
+	if (originX < 0 || originY < 0 || originX > width/2 || originY > height/2) {
+		console.log(`⚠️  Origin out of bounds (${originX},${originY}), recalculating...`);
+		// Assume TL finder center is at module (3,3) in the grid (0-indexed)
+		// So origin should be TL.x - 3*modulePx, TL.y - 3*modulePx for a clean code
+		originX = Math.round(TL.x - 3.5*modulePx);
+		originY = Math.round(TL.y - 3.5*modulePx);
+		originX = Math.max(0, originX);
+		originY = Math.max(0, originY);
+		console.log(`   Recalculated origin: (${originX},${originY})`);
+	}
+	
 	const qrModules = modulesEst;
 	console.log(`QR analysis: refined spacing → ${qrModules} modules @ ${modulePx}px, origin=(${originX},${originY})`);
-	return { finders:[TL,TR,BL], modulePx, qrModules, originX: Math.max(0, originX), originY: Math.max(0, originY) };
+	return { finders:[TL,TR,BL], modulePx, qrModules, originX, originY };
 }
 
 // Simple run-length based finder locator fallback
