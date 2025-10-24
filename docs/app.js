@@ -1777,8 +1777,25 @@ function detectSPQR(imageData) {
         console.log(`  Estimated grid: ${modules}×${modules}, ${modulePx}px/module`);
     }
     
-    // Now check if this has color patterns (BWRG vs CMYRGB detection)
-    if (hasGridHint) { // If we have a grid hint, we know it's colored
+	// Now check if this has color patterns (BWRG vs CMYRGB detection)
+	if (hasGridHint) { // If we have a grid hint, we know it's colored
+		// Prefer robust CMYRGB finder-key palette sampling if available
+		try {
+			const cmy = sampleCMYRGBFinderPalette(data, width, height, modulePx, modules, originX, originY);
+			if (cmy && cmy.W && cmy.R && cmy.G && cmy.Y && cmy.K && cmy.M && cmy.C && cmy.B) {
+				const dist = (a,b)=>Math.hypot(a.r-b.r,a.g-b.g,a.b-b.b);
+				// Distinctiveness in TL 2x2 (W,R,G,Y) and TR 2x2 (K,M,C,B)
+				const tlDistinct = [dist(cmy.W,cmy.R), dist(cmy.W,cmy.G), dist(cmy.W,cmy.Y), dist(cmy.R,cmy.G), dist(cmy.R,cmy.Y), dist(cmy.G,cmy.Y)].filter(d=>d>50).length;
+				const trDistinct = [dist(cmy.K,cmy.M), dist(cmy.K,cmy.C), dist(cmy.K,cmy.B), dist(cmy.M,cmy.C), dist(cmy.M,cmy.B), dist(cmy.C,cmy.B)].filter(d=>d>50).length;
+				if (tlDistinct >= 3 && trDistinct >= 3) {
+					console.log('CMYRGB (8-color, 3-layer) SPQR detected via finder-key palette');
+					if (savedGridHint) window.currentGridHint = savedGridHint;
+					return decodeCMYRGBLayers(imageData);
+				}
+			}
+		} catch (e) {
+			// fallback to sampling below
+		}
         
         // Sample the TL finder center (the 3×3 inner square of the finder)
         // BWRG: solid color in all 9 modules
