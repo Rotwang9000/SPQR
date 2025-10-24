@@ -3556,26 +3556,152 @@ if (!baseText && !greenText && !redText) {
 		console.log('🔥 NUCLEAR OPTION: Bypassing jsQR, extracting raw data for parity recovery...');
 		// Extract raw bit sequences - for QR v1-21, we know the data pattern positions
 		// We'll extract the sequences even if they're corrupt, then use parity to recover
-		const extractRawBits = (mods, layerName) => {
-			console.log(`   Extracting raw bits from ${layerName}...`);
-			// For 21x21 QR v1 with alphanumeric mode, data starts at specific positions
-			// This is a simplified extractor that reads the data codewords region
-			// Format: [mode bits][count bits][data bits][error correction bits]
+	// QR code raw bit extraction following ISO/IEC 18004 zigzag pattern
+	const extractRawBits = (mods, layerName) => {
+		console.log(`   🔬 Extracting raw bits from ${layerName}...`);
+		const n = mods.length;
+		const bits = [];
+		
+		// Function pattern regions to skip
+		const inFinder = (x, y) => {
+			return (x < 9 && y < 9) || (x >= n-8 && y < 9) || (x < 9 && y >= n-8);
+		};
+		const inTiming = (x, y) => (x === 6 || y === 6);
+		const inDarkModule = (x, y) => (x === 8 && y === n-8);
+		const skipCell = (x, y) => inFinder(x, y) || inTiming(x, y) || inDarkModule(x, y);
+		
+		// QR reads data in vertical columns, moving right-to-left in pairs
+		// Starting from bottom-right, moving up in column pairs
+		let upward = true;
+		for (let col = n-1; col > 0; col -= 2) {
+			if (col === 6) col--; // Skip timing column
 			
-			// QR v1 data region (simplified zigzag pattern, bottom-right to top-left)
-			const bits = [];
-			// TODO: Implement proper QR data extraction following the standard zigzag pattern
-			// For now, return null to skip
+			const c1 = col, c2 = col - 1;
+			const yStart = upward ? n-1 : 0;
+			const yEnd = upward ? -1 : n;
+			const yStep = upward ? -1 : 1;
+			
+			for (let y = yStart; y !== yEnd; y += yStep) {
+				// Read right column first, then left
+				for (const x of [c1, c2]) {
+					if (!skipCell(x, y)) {
+						bits.push(mods[y][x] ? 1 : 0);
+					}
+				}
+			}
+			
+			upward = !upward;
+		}
+		
+		console.log(`      ${layerName}: extracted ${bits.length} raw bits`);
+		return bits;
+	};
+	
+	const baseBits = extractRawBits(baseMods, 'Base');
+	const greenBits = extractRawBits(greenMods, 'Green (parity)');
+	const redBits = extractRawBits(redMods, 'Red');
+	
+	console.log(`   Raw bit extraction complete: base=${baseBits.length}, green=${greenBits.length}, red=${redBits.length}`);
+	
+	// PARITY RECOVERY: Use XOR of any two layers to recover the third!
+	if (baseBits && greenBits && redBits && baseBits.length === greenBits.length && greenBits.length === redBits.length) {
+		console.log(`🔥 PARITY MAGIC: Attempting raw bit-level recovery...`);
+		
+		// Try decoding each layer's bits
+		const decodeBits = (bits, name) => {
+			try {
+				// Extract mode (first 4 bits)
+				const mode = (bits[0] << 3) | (bits[1] << 2) | (bits[2] << 1) | bits[3];
+				if (mode === 0b0010) { // Alphanumeric = 0010
+					// Character count (next 9 bits for version 1)
+					let count = 0;
+					for (let i = 4; i < 13; i++) count = (count << 1) | bits[i];
+					
+					// Data bits (11 bits per pair, 6 for last if odd)
+					const alphanum = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
+					let text = '';
+					let bitIdx = 13;
+					
+					for (let i = 0; i < Math.floor(count / 2); i++) {
+						let val = 0;
+						for (let j = 0; j < 11; j++) {
+							if (bitIdx < bits.length) val = (val << 1) | bits[bitIdx++];
+						}
+						text += alphanum[Math.floor(val / 45)] + alphanum[val % 45];
+					}
+					
+					if (count % 2 === 1 && bitIdx + 6 <= bits.length) {
+						let val = 0;
+						for (let j = 0; j < 6; j++) val = (val << 1) | bits[bitIdx++];
+						text += alphanum[val];
+					}
+					
+					console.log(`      ${name} decoded: "${text}" (${text.length} chars)`);
+					return text;
+				} else if (mode === 0b0100) { // Byte mode = 0100
+					let count = 0;
+					for (let i = 4; i < 12; i++) count = (count << 1) | bits[i];
+					
+					let text = '';
+					let bitIdx = 12;
+					for (let i = 0; i < count; i++) {
+						let byte = 0;
+						for (let j = 0; j < 8; j++) {
+							if (bitIdx < bits.length) byte = (byte << 1) | bits[bitIdx++];
+						}
+						text += String.fromCharCode(byte);
+					}
+					console.log(`      ${name} decoded: "${text}" (${text.length} chars)`);
+					return text;
+				}
+			} catch (e) {
+				console.log(`      ${name} decode failed:`, e.message);
+			}
 			return null;
 		};
 		
-		const baseBits = extractRawBits(baseMods, 'Base');
-		const greenBits = extractRawBits(greenMods, 'Green (parity)');
-		const redBits = extractRawBits(redMods, 'Red');
+		const baseDecoded = decodeBits(baseBits, 'Base');
+		const greenDecoded = decodeBits(greenBits, 'Green');
+		const redDecoded = decodeBits(redBits, 'Red');
 		
-		console.log(`   Raw bit extraction: base=${!!baseBits}, green=${!!greenBits}, red=${!!redBits}`);
-		// Even if we extracted bits, we'd need to implement QR decoding logic
-		// This is beyond our current scope - mark as TODO for future enhancement
+		// If green is parity data, try recovery
+		if (greenDecoded && greenDecoded.startsWith('SPQRv1|')) {
+			console.log(`🔐 PARITY MODE: Green layer is parity, using for recovery...`);
+			
+			// If base failed but red succeeded, recover base
+			if (!baseDecoded && redDecoded) {
+				console.log(`   🔧 Recovering base layer: base = green XOR red`);
+				const recoveredBits = [];
+				for (let i = 0; i < baseBits.length; i++) {
+					recoveredBits.push(greenBits[i] ^ redBits[i]);
+				}
+				const recoveredText = decodeBits(recoveredBits, 'Base (recovered)');
+				if (recoveredText) {
+					baseText = recoveredText;
+					console.log(`   ✅ BASE LAYER RECOVERED: "${baseText}"`);
+				}
+			}
+			
+			// If red failed but base succeeded, recover red
+			if (!redDecoded && baseDecoded) {
+				console.log(`   🔧 Recovering red layer: red = green XOR base`);
+				const recoveredBits = [];
+				for (let i = 0; i < redBits.length; i++) {
+					recoveredBits.push(greenBits[i] ^ baseBits[i]);
+				}
+				const recoveredText = decodeBits(recoveredBits, 'Red (recovered)');
+				if (recoveredText) {
+					redText = recoveredText;
+					console.log(`   ✅ RED LAYER RECOVERED: "${redText}"`);
+				}
+			}
+		} else {
+			// All three layers are data, use what we decoded
+			if (baseDecoded) baseText = baseDecoded;
+			if (greenDecoded) greenText = greenDecoded;
+			if (redDecoded) redText = redDecoded;
+		}
+	}
 	}
 }
 	
