@@ -506,83 +506,179 @@ function estimateGrid(mask, width, height) {
 
 // Locate QR structure directly from colored SPQR image
 function locateQRStructure(data, width, height) {
-	console.log(`locateQRStructure: ${width}x${height} image`);
-	// Pre-normalise: approximate white-balance and contrast stretch for robustness
-	let sumBright = 0, count = 0;
-	for (let i = 0; i < data.length; i += 20) { const r = data[i], g = data[i+1], b = data[i+2]; sumBright += Math.max(r,g,b); count++; }
-	const avgBright = Math.max(80, Math.min(220, Math.round(sumBright / Math.max(1,count))));
-	const gain = avgBright > 0 ? 180 / avgBright : 1.0; // target around 180 mid-brightness
-	const isQRPixel = (x, y) => {
-		const i = (y * width + x) * 4;
-		let r = Math.min(255, Math.round(data[i] * gain));
-		let g = Math.min(255, Math.round(data[i+1] * gain));
-		let b = Math.min(255, Math.round(data[i+2] * gain));
-		const maxc = Math.max(r,g,b), minc = Math.min(r,g,b);
-		const brightness = maxc; const chroma = maxc - minc;
-		if (brightness > 235 && chroma < 12) return false; // near-white
-		if (brightness < 60) return true; // dark
-		return chroma > 10; // coloured/darker content
+    console.log(`locateQRStructure: ${width}x${height} image`);
+	
+	// Simple brightness-based classification for finder detection
+    const isQRPixel = (x, y) => {
+        const i = (y * width + x) * 4;
+		const r = data[i], g = data[i+1], b = data[i+2];
+		const brightness = Math.max(r, g, b);
+		const minBright = Math.min(r, g, b);
+		// White pixels: very bright and low chroma
+		if (brightness > 230 && minBright > 200) return false;
+		// Everything else (black or colored) counts as "dark" for finder detection
+		return true;
 	};
-	const finderCandidates = [];
-	// Horizontal scan
-	for (let y = 0; y < height; y += Math.max(1, Math.floor(height/40))) {
-		const runs = []; let last = false, len = 0;
-		for (let x = 0; x <= width; x++) { const cur = x<width ? isQRPixel(x,y) : false; if (x===0){last=cur;len=1;continue;} if (cur===last && x<width) len++; else { runs.push({dark:last,len,endX:x-1}); last=cur; len=1; } }
-		for (let i = 2; i < runs.length - 2; i++) {
-			const a=runs[i-2], b=runs[i-1], c=runs[i], d=runs[i+1], e=runs[i+2];
-			if (a.dark && !b.dark && c.dark && !d.dark && e.dark) { const t=a.len+b.len+c.len+d.len+e.len; if (t>=12) { const r=[a.len,b.len,c.len,d.len,e.len].map(v=>v/t); if (Math.abs(r[0]-0.14)<0.10 && Math.abs(r[1]-0.14)<0.10 && Math.abs(r[2]-0.43)<0.18 && Math.abs(r[3]-0.14)<0.10 && Math.abs(r[4]-0.14)<0.10) { const centerX = a.endX - a.len + 1 + a.len + b.len + Math.floor(c.len/2); const modulePx = Math.max(3, Math.round(c.len/3)); finderCandidates.push({ x:centerX, y, modulePx, strength:t }); } } }
+	
+    const finderCandidates = [];
+	
+	// Horizontal scan with better spacing
+    for (let y = 0; y < height; y += Math.max(1, Math.floor(height/50))) {
+		const runs = [];
+		let last = false, len = 0;
+		for (let x = 0; x <= width; x++) {
+			const cur = x < width ? isQRPixel(x, y) : false;
+			if (x === 0) { last = cur; len = 1; continue; }
+			if (cur === last && x < width) {
+				len++;
+			} else {
+				runs.push({ dark: last, len, endX: x - 1 });
+				last = cur;
+				len = 1;
+			}
+		}
+		
+        for (let i = 2; i < runs.length - 2; i++) {
+			const a = runs[i-2], b = runs[i-1], c = runs[i], d = runs[i+1], e = runs[i+2];
+			if (a.dark && !b.dark && c.dark && !d.dark && e.dark) {
+				const total = a.len + b.len + c.len + d.len + e.len;
+				if (total >= 12) {
+					const ratios = [a.len, b.len, c.len, d.len, e.len].map(v => v / total);
+					// Check for 1:1:3:1:1 pattern (relaxed tolerances)
+					if (Math.abs(ratios[0] - 0.14) < 0.12 && 
+					    Math.abs(ratios[1] - 0.14) < 0.12 && 
+					    Math.abs(ratios[2] - 0.43) < 0.20 && 
+					    Math.abs(ratios[3] - 0.14) < 0.12 && 
+					    Math.abs(ratios[4] - 0.14) < 0.12) {
+						const centerX = a.endX - a.len + 1 + a.len + b.len + Math.floor(c.len / 2);
+						const modulePx = Math.max(3, Math.round(c.len / 3));
+						finderCandidates.push({ x: centerX, y, modulePx, strength: total });
+					}
+				}
+			}
 		}
 	}
+	
 	// Vertical scan
-	for (let x = 0; x < width; x += Math.max(1, Math.floor(width/40))) {
-		const runs = []; let last = false, len = 0;
-		for (let y = 0; y <= height; y++) { const cur = y<height ? isQRPixel(x,y) : false; if (y===0){last=cur;len=1;continue;} if (cur===last && y<height) len++; else { runs.push({dark:last,len,endY:y-1}); last=cur; len=1; } }
-		for (let i = 2; i < runs.length - 2; i++) {
-			const a=runs[i-2], b=runs[i-1], c=runs[i], d=runs[i+1], e=runs[i+2];
-			if (a.dark && !b.dark && c.dark && !d.dark && e.dark) { const t=a.len+b.len+c.len+d.len+e.len; if (t>=12) { const r=[a.len,b.len,c.len,d.len,e.len].map(v=>v/t); if (Math.abs(r[0]-0.14)<0.10 && Math.abs(r[1]-0.14)<0.10 && Math.abs(r[2]-0.43)<0.18 && Math.abs(r[3]-0.14)<0.10 && Math.abs(r[4]-0.14)<0.10) { const centerY = a.endY - a.len + 1 + a.len + b.len + Math.floor(c.len/2); const modulePx = Math.max(3, Math.round(c.len/3)); finderCandidates.push({ x, y:centerY, modulePx, strength:t }); } } }
+    for (let x = 0; x < width; x += Math.max(1, Math.floor(width/50))) {
+		const runs = [];
+		let last = false, len = 0;
+		for (let y = 0; y <= height; y++) {
+			const cur = y < height ? isQRPixel(x, y) : false;
+			if (y === 0) { last = cur; len = 1; continue; }
+			if (cur === last && y < height) {
+				len++;
+			} else {
+				runs.push({ dark: last, len, endY: y - 1 });
+				last = cur;
+				len = 1;
+			}
+		}
+		
+        for (let i = 2; i < runs.length - 2; i++) {
+			const a = runs[i-2], b = runs[i-1], c = runs[i], d = runs[i+1], e = runs[i+2];
+			if (a.dark && !b.dark && c.dark && !d.dark && e.dark) {
+				const total = a.len + b.len + c.len + d.len + e.len;
+				if (total >= 12) {
+					const ratios = [a.len, b.len, c.len, d.len, e.len].map(v => v / total);
+					if (Math.abs(ratios[0] - 0.14) < 0.12 && 
+					    Math.abs(ratios[1] - 0.14) < 0.12 && 
+					    Math.abs(ratios[2] - 0.43) < 0.20 && 
+					    Math.abs(ratios[3] - 0.14) < 0.12 && 
+					    Math.abs(ratios[4] - 0.14) < 0.12) {
+						const centerY = a.endY - a.len + 1 + a.len + b.len + Math.floor(c.len / 2);
+						const modulePx = Math.max(3, Math.round(c.len / 3));
+						finderCandidates.push({ x, y: centerY, modulePx, strength: total });
+					}
+				}
+			}
 		}
 	}
-	if (finderCandidates.length < 6) { console.log(`Found only ${finderCandidates.length} finder candidates, need at least 6`); return null; }
-	// Cluster
-	const avgModulePx = finderCandidates.reduce((s,c)=>s+c.modulePx,0)/finderCandidates.length;
-	const clusters=[]; for (const cand of finderCandidates){ let ok=false; for (const cl of clusters){ const dx=cand.x-cl.x, dy=cand.y-cl.y; if (Math.hypot(dx,dy) < avgModulePx*5){ cl.x=(cl.x*cl.count+cand.x)/(cl.count+1); cl.y=(cl.y*cl.count+cand.y)/(cl.count+1); cl.strength+=cand.strength; cl.count++; ok=true; break;} } if(!ok) clusters.push({x:cand.x,y:cand.y,strength:cand.strength,count:1}); }
-	clusters.sort((a,b)=>b.strength-a.strength);
-	const finders = clusters.slice(0,3);
-	if (finders.length<3) { console.log(`Found only ${finders.length} finder clusters, need 3`); return null; }
-	// Label finders by geometry: TL = smallest (x+y), TR = largest x - y, BL = largest y - x
-	const scoreTL = f => f.x + f.y; const scoreTR = f => f.x - f.y; const scoreBL = f => -f.x + f.y;
-	const TL = [...finders].sort((a,b)=>scoreTL(a)-scoreTL(b))[0];
-	const TR = [...finders].sort((a,b)=>scoreTR(b)-scoreTR(a))[0];
-	const BL = [...finders].sort((a,b)=>scoreBL(b)-scoreBL(a))[0];
-	// Derive modulePx from finder spacing between TL<->TR and TL<->BL
-	const spacingX = Math.hypot(TR.x - TL.x, TR.y - TL.y);
-	const spacingY = Math.hypot(BL.x - TL.x, BL.y - TL.y);
-	let modulePx = Math.round(((spacingX + spacingY) / 2) / Math.max(14, Math.round((spacingX + spacingY) / 2 / avgModulePx) - 7)); // robust fallback
-	// Better: estimate version from spacing using 7 modules between inner centres offset (centres are at (3,3) and (modules-4,3)): spacing ≈ (modules-7)*modulePx
-	const modulesEstimateFromX = Math.round(spacingX / Math.max(1,modulePx)) + 7;
-	const modulesEstimateFromY = Math.round(spacingY / Math.max(1,modulePx)) + 7;
-	let modulesEst = Math.max(21, 4*Math.round((Math.round((modulesEstimateFromX+modulesEstimateFromY)/2) - 17)/4) + 17);
-	modulePx = Math.max(3, Math.round(((spacingX + spacingY) / 2) / (modulesEst - 7)));
-	// Origin is TL outer quiet zone: TL inner centre is at (margin+3, margin+3) modules from origin, with margin=4
-	let originX = Math.round(TL.x - (4+3)*modulePx);
-	let originY = Math.round(TL.y - (4+3)*modulePx);
 	
-	// Sanity check: origin should never be negative or wildly off
-	// If it is, recalculate using the actual detected grid size
-	if (originX < 0 || originY < 0 || originX > width/2 || originY > height/2) {
-		console.log(`⚠️  Origin out of bounds (${originX},${originY}), recalculating...`);
-		// Assume TL finder center is at module (3,3) in the grid (0-indexed)
-		// So origin should be TL.x - 3*modulePx, TL.y - 3*modulePx for a clean code
-		originX = Math.round(TL.x - 3.5*modulePx);
-		originY = Math.round(TL.y - 3.5*modulePx);
-		originX = Math.max(0, originX);
-		originY = Math.max(0, originY);
-		console.log(`   Recalculated origin: (${originX},${originY})`);
+	if (finderCandidates.length < 6) {
+		console.log(`⚠️  Found only ${finderCandidates.length} finder candidates, need at least 6`);
+		return null;
 	}
 	
-	const qrModules = modulesEst;
-	console.log(`QR analysis: refined spacing → ${qrModules} modules @ ${modulePx}px, origin=(${originX},${originY})`);
-	return { finders:[TL,TR,BL], modulePx, qrModules, originX, originY };
+	// Cluster candidates that are close together
+	const avgModulePx = finderCandidates.reduce((s, c) => s + c.modulePx, 0) / finderCandidates.length;
+	const clusters = [];
+	for (const cand of finderCandidates) {
+		let found = false;
+		for (const cl of clusters) {
+			const dist = Math.hypot(cand.x - cl.x, cand.y - cl.y);
+			if (dist < avgModulePx * 5) {
+				// Merge into existing cluster
+				cl.x = (cl.x * cl.count + cand.x) / (cl.count + 1);
+				cl.y = (cl.y * cl.count + cand.y) / (cl.count + 1);
+				cl.modulePx = (cl.modulePx * cl.count + cand.modulePx) / (cl.count + 1);
+				cl.strength += cand.strength;
+				cl.count++;
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			clusters.push({ x: cand.x, y: cand.y, modulePx: cand.modulePx, strength: cand.strength, count: 1 });
+		}
+	}
+	
+	clusters.sort((a, b) => b.strength - a.strength);
+	const finders = clusters.slice(0, 3);
+	
+	if (finders.length < 3) {
+		console.log(`⚠️  Found only ${finders.length} finder clusters, need 3`);
+		return null;
+	}
+	
+	// Identify TL, TR, BL by geometry
+	// TL has smallest x+y, TR has largest x-y, BL has largest y-x
+	const scoreTL = f => f.x + f.y;
+	const scoreTR = f => f.x - f.y;
+	const scoreBL = f => f.y - f.x;
+	
+	const TL = [...finders].sort((a, b) => scoreTL(a) - scoreTL(b))[0];
+	const TR = [...finders].sort((a, b) => scoreTR(b) - scoreTR(a))[0];
+	const BL = [...finders].sort((a, b) => scoreBL(b) - scoreBL(a))[0];
+	
+	console.log(`   Finders: TL(${Math.round(TL.x)},${Math.round(TL.y)}) TR(${Math.round(TR.x)},${Math.round(TR.y)}) BL(${Math.round(BL.x)},${Math.round(BL.y)})`);
+	
+	// Calculate module size from finder spacing
+	// Finder centers are 7 modules apart (including the 7x7 finder itself)
+	// So distance TL->TR and TL->BL should be (modules-7) * modulePx
+	const distTL_TR = Math.hypot(TR.x - TL.x, TR.y - TL.y);
+	const distTL_BL = Math.hypot(BL.x - TL.x, BL.y - TL.y);
+	const avgDist = (distTL_TR + distTL_BL) / 2;
+	
+	// Use average module size from detections as starting point
+	let modulePx = Math.round((TL.modulePx + TR.modulePx + BL.modulePx) / 3);
+	
+	// Refine: distance should be (modules - 7) * modulePx
+	// For smallest QR (21x21): distance ≈ 14 * modulePx
+	let qrModules = Math.round(avgDist / modulePx) + 7;
+	
+	// Round to valid QR version: 21, 25, 29, 33, ... (4n + 17 where n=1,2,3...)
+	qrModules = Math.max(21, Math.round((qrModules - 17) / 4) * 4 + 17);
+	
+	// Recalculate modulePx based on actual QR size
+	modulePx = Math.round(avgDist / (qrModules - 7));
+	
+	// Origin calculation: TL finder center is at module position (3.5, 3.5) within the 7x7 finder
+	// The finder starts at module (0,0) of the QR grid (including 4-module quiet zone)
+	// So TL.x = originX + 3.5 * modulePx
+	// Therefore: originX = TL.x - 3.5 * modulePx
+	const originX = Math.round(TL.x - 3.5 * modulePx);
+	const originY = Math.round(TL.y - 3.5 * modulePx);
+	
+	console.log(`   Spacing: ${Math.round(avgDist)}px → ${qrModules} modules @ ${modulePx}px, origin=(${originX},${originY})`);
+	
+	return {
+		finders: [TL, TR, BL],
+		modulePx,
+		qrModules,
+		originX: Math.max(0, originX),
+		originY: Math.max(0, originY)
+	};
 }
 
 // Simple run-length based finder locator fallback
