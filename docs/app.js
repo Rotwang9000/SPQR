@@ -188,15 +188,22 @@ async function generateSpqrClient(text, options) {
 			
 			let colour = '#ffffff';
 			if (isEightColour) {
-				const code = (b << 2) | (r << 1); // 0..7
+				// CMYRGB: combine base (bit2), green (bit1), red (bit0)
+				const gBit = 0; // TODO: add true green layer when available
+				const code = (b << 2) | (gBit << 1) | r; // 0..7
 				const idxMap = [0,1,2,3,4,5,6,7];
 				colour = colours[idxMap[code]] || '#000000';
 			} else {
-				// 4-colour BWRG mapping: white, red, green, black/green for overlaps
-				if (b && !r) colour = colours[3];
-				else if (!b && r && !g) colour = colours[1];
-				else if (g) colour = colours[2];
-				else colour = colours[0];
+				// 4-colour BWRG mapping using two layers (base, red); green = overlap
+				if (b && r) {
+					colour = colours[2]; // green (overlap)
+				} else if (b && !r) {
+					colour = colours[3]; // black
+				} else if (!b && r) {
+					colour = colours[1]; // red
+				} else {
+					colour = colours[0]; // white
+				}
 			}
 			if (colour === '#ffffff') continue;
 			const px = (x + margin) * cell;
