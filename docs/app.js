@@ -4316,11 +4316,12 @@ function sampleCMYRGBFinderPalette(rgba, width, height, modulePx, modulesTotal, 
 	const sample = (cx,cy,r)=>{ let R=0,G=0,B=0,C=0; for (let y=Math.max(0,cy-r); y<Math.min(height,cy+r); y++){ for(let x=Math.max(0,cx-r); x<Math.min(width,cx+r); x++){ const i=(y*width+x)*4; R+=rgba[i]; G+=rgba[i+1]; B+=rgba[i+2]; C++; }} return C?{r:Math.round(R/C),g:Math.round(G/C),b:Math.round(B/C)}:{r:0,g:0,b:0}; };
 	const r = Math.max(1, Math.floor(modulePx/2));
 	
-	// TL finder: inner 2×2 key at modules (2,2), (3,2), (2,3), (3,3)
-	const tl00 = center(2, 2); const tl10 = center(3, 2); const tl01 = center(2, 3); const tl11 = center(3, 3);
-	// TR finder: starts at module (modulesTotal-7, 0), inner 2×2 key at (modulesTotal-5, 2) etc.
+	// TL finder: 2×2 colored keys drawn with 1.5 module width each, starting at module (2,2)
+	// Centers are at (2.75, 2.75), (4.25, 2.75), (2.75, 4.25), (4.25, 4.25)
+	const tl00 = center(2.75, 2.75); const tl10 = center(4.25, 2.75); const tl01 = center(2.75, 4.25); const tl11 = center(4.25, 4.25);
+	// TR finder: starts at module (modulesTotal-7, 0), same offsets
 	const trX = modulesTotal - 7;
-	const tr00 = center(trX+2, 2); const tr10 = center(trX+3, 2); const tr01 = center(trX+2, 3); const tr11 = center(trX+3, 3);
+	const tr00 = center(trX+2.75, 2.75); const tr10 = center(trX+4.25, 2.75); const tr01 = center(trX+2.75, 4.25); const tr11 = center(trX+4.25, 4.25);
 	
 	return {
 		W: sample(tl00.x, tl00.y, r), R: sample(tl10.x, tl10.y, r), G: sample(tl01.x, tl01.y, r), Y: sample(tl11.x, tl11.y, r),
