@@ -1788,16 +1788,18 @@ function detectSPQR(imageData) {
 				// Distinctiveness in TL 2x2 (W,R,G,Y) and TR 2x2 (K,M,C,B)
 				const tlDists = [dist(cmy.W,cmy.R), dist(cmy.W,cmy.G), dist(cmy.W,cmy.Y), dist(cmy.R,cmy.G), dist(cmy.R,cmy.Y), dist(cmy.G,cmy.Y)];
 				const trDists = [dist(cmy.K,cmy.M), dist(cmy.K,cmy.C), dist(cmy.K,cmy.B), dist(cmy.M,cmy.C), dist(cmy.M,cmy.B), dist(cmy.C,cmy.B)];
-				const tlDistinct = tlDists.filter(d=>d>50).length;
-				const trDistinct = trDists.filter(d=>d>50).length;
-				console.log(`   TL distinctiveness: ${tlDistinct}/6 pairs > 50px distance (${tlDists.map(d=>Math.round(d)).join(', ')})`);
-				console.log(`   TR distinctiveness: ${trDistinct}/6 pairs > 50px distance (${trDists.map(d=>Math.round(d)).join(', ')})`);
-				if (tlDistinct >= 3 && trDistinct >= 3) {
+				// For degraded images, use lower threshold (30px instead of 50px) and require fewer pairs (2 instead of 3)
+				const threshold = 30;
+				const tlDistinct = tlDists.filter(d=>d>threshold).length;
+				const trDistinct = trDists.filter(d=>d>threshold).length;
+				console.log(`   TL distinctiveness: ${tlDistinct}/6 pairs > ${threshold}px distance (${tlDists.map(d=>Math.round(d)).join(', ')})`);
+				console.log(`   TR distinctiveness: ${trDistinct}/6 pairs > ${threshold}px distance (${trDists.map(d=>Math.round(d)).join(', ')})`);
+				if (tlDistinct >= 2 && trDistinct >= 2) {
 					console.log('CMYRGB (8-color, 3-layer) SPQR detected via finder-key palette');
 					if (savedGridHint) window.currentGridHint = savedGridHint;
 					return decodeCMYRGBLayers(imageData);
 				} else {
-					console.log(`   ⚠️  Not enough distinctiveness for CMYRGB (need 3+3, got ${tlDistinct}+${trDistinct}), trying BWRG...`);
+					console.log(`   ⚠️  Not enough distinctiveness for CMYRGB (need 2+2, got ${tlDistinct}+${trDistinct}), trying BWRG...`);
 				}
 			}
 		} catch (e) {
