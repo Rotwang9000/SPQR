@@ -4299,14 +4299,19 @@ function detectSPQRPattern(data, width, height) {
 }
 
 function sampleCMYRGBFinderPalette(rgba, width, height, modulePx, modulesTotal, originX, originY) {
-	// TL inner 3×3 contains 2×2 grid for W,R,G,Y; TR contains K,M,C,B
+	// TL inner 3×3 contains 2×2 grid for W,R,G,Y (at modules 2,3 in the 7×7 finder)
+	// TR inner 3×3 contains 2×2 grid for K,M,C,B
+	// originX/originY already point to module (0,0) of the QR grid
 	const center = (mx,my)=>({ x: originX + Math.round((mx+0.5)*modulePx), y: originY + Math.round((my+0.5)*modulePx) });
 	const sample = (cx,cy,r)=>{ let R=0,G=0,B=0,C=0; for (let y=Math.max(0,cy-r); y<Math.min(height,cy+r); y++){ for(let x=Math.max(0,cx-r); x<Math.min(width,cx+r); x++){ const i=(y*width+x)*4; R+=rgba[i]; G+=rgba[i+1]; B+=rgba[i+2]; C++; }} return C?{r:Math.round(R/C),g:Math.round(G/C),b:Math.round(B/C)}:{r:0,g:0,b:0}; };
 	const r = Math.max(1, Math.floor(modulePx/2));
-	// TL top-left of finder inner area starts at module (margin+2, margin+2)
-	const m = 4; // margin modules
-	const tl00 = center(m+2, m+2); const tl10 = center(m+3, m+2); const tl01 = center(m+2, m+3); const tl11 = center(m+3, m+3);
-	const tr00 = center(modulesTotal - (m+5), m+2); const tr10 = center(modulesTotal - (m+4), m+2); const tr01 = center(modulesTotal - (m+5), m+3); const tr11 = center(modulesTotal - (m+4), m+3);
+	
+	// TL finder: inner 2×2 key at modules (2,2), (3,2), (2,3), (3,3)
+	const tl00 = center(2, 2); const tl10 = center(3, 2); const tl01 = center(2, 3); const tl11 = center(3, 3);
+	// TR finder: starts at module (modulesTotal-7, 0), inner 2×2 key at (modulesTotal-5, 2) etc.
+	const trX = modulesTotal - 7;
+	const tr00 = center(trX+2, 2); const tr10 = center(trX+3, 2); const tr01 = center(trX+2, 3); const tr11 = center(trX+3, 3);
+	
 	return {
 		W: sample(tl00.x, tl00.y, r), R: sample(tl10.x, tl10.y, r), G: sample(tl01.x, tl01.y, r), Y: sample(tl11.x, tl11.y, r),
 		K: sample(tr00.x, tr00.y, r), M: sample(tr10.x, tr10.y, r), C: sample(tr01.x, tr01.y, r), B: sample(tr11.x, tr11.y, r)
