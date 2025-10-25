@@ -1783,17 +1783,25 @@ function detectSPQR(imageData) {
 		try {
 			const cmy = sampleCMYRGBFinderPalette(data, width, height, modulePx, modules, originX, originY);
 			if (cmy && cmy.W && cmy.R && cmy.G && cmy.Y && cmy.K && cmy.M && cmy.C && cmy.B) {
+				console.log('   CMYRGB palette sampled:', JSON.stringify(cmy, null, 2));
 				const dist = (a,b)=>Math.hypot(a.r-b.r,a.g-b.g,a.b-b.b);
 				// Distinctiveness in TL 2x2 (W,R,G,Y) and TR 2x2 (K,M,C,B)
-				const tlDistinct = [dist(cmy.W,cmy.R), dist(cmy.W,cmy.G), dist(cmy.W,cmy.Y), dist(cmy.R,cmy.G), dist(cmy.R,cmy.Y), dist(cmy.G,cmy.Y)].filter(d=>d>50).length;
-				const trDistinct = [dist(cmy.K,cmy.M), dist(cmy.K,cmy.C), dist(cmy.K,cmy.B), dist(cmy.M,cmy.C), dist(cmy.M,cmy.B), dist(cmy.C,cmy.B)].filter(d=>d>50).length;
+				const tlDists = [dist(cmy.W,cmy.R), dist(cmy.W,cmy.G), dist(cmy.W,cmy.Y), dist(cmy.R,cmy.G), dist(cmy.R,cmy.Y), dist(cmy.G,cmy.Y)];
+				const trDists = [dist(cmy.K,cmy.M), dist(cmy.K,cmy.C), dist(cmy.K,cmy.B), dist(cmy.M,cmy.C), dist(cmy.M,cmy.B), dist(cmy.C,cmy.B)];
+				const tlDistinct = tlDists.filter(d=>d>50).length;
+				const trDistinct = trDists.filter(d=>d>50).length;
+				console.log(`   TL distinctiveness: ${tlDistinct}/6 pairs > 50px distance (${tlDists.map(d=>Math.round(d)).join(', ')})`);
+				console.log(`   TR distinctiveness: ${trDistinct}/6 pairs > 50px distance (${trDists.map(d=>Math.round(d)).join(', ')})`);
 				if (tlDistinct >= 3 && trDistinct >= 3) {
 					console.log('CMYRGB (8-color, 3-layer) SPQR detected via finder-key palette');
 					if (savedGridHint) window.currentGridHint = savedGridHint;
 					return decodeCMYRGBLayers(imageData);
+				} else {
+					console.log(`   ⚠️  Not enough distinctiveness for CMYRGB (need 3+3, got ${tlDistinct}+${trDistinct}), trying BWRG...`);
 				}
 			}
 		} catch (e) {
+			console.log('   ⚠️  CMYRGB palette sampling failed:', e.message);
 			// fallback to sampling below
 		}
         
