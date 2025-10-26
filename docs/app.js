@@ -1667,6 +1667,10 @@ async function handleFileUpload(e) {
 					}
 					return;
 				}
+				// ROI decode failed - clear grid hint before trying full image
+				window.currentGridHint = null;
+				window.cameraCalibration = null;
+				window.cameraCalibrationCMY = null;
 			}
 			// Fallback: SPQR detect full image
 			const spqrResult = detectSPQR(imageData);
