@@ -3447,16 +3447,24 @@ function decodeCMYRGBLayers(imageData) {
 				return `RGB(${data[idx]},${data[idx+1]},${data[idx+2]})`;
 			};
 			
-			console.log(`   DEBUG sample RGB values:`);
-			console.log(`      Center (10,10): ${sampleRGB(10,10)}`);
-			console.log(`      TL finder (3,3): ${sampleRGB(3,3)}`);
-			console.log(`      TR inner (${modules-4},3): ${sampleRGB(modules-4,3)}`);
-			console.log(`      Data area (12,12): ${sampleRGB(12,12)}`);
+			// Sample and classify a few key pixels to debug
+			const debugPixel = (mx, my, label) => {
+				const cx = Math.round(originX + (mx + 0.5) * modulePx);
+				const cy = Math.round(originY + (my + 0.5) * modulePx);
+				const idx = (cy * width + cx) * 4;
+				const r = data[idx], g = data[idx+1], b = data[idx+2];
+				const color = classifyPixel(r, g, b);
+				const bBit = ['C', 'G', 'B', 'K'].includes(color);
+				const gBit = ['M', 'R', 'B', 'K'].includes(color);
+				const rBit = ['Y', 'R', 'G', 'K'].includes(color);
+				console.log(`      ${label}: RGB(${r},${g},${b}) → '${color}' → Base=${bBit}, Green=${gBit}, Red=${rBit}`);
+			};
 			
-			console.log(`   DEBUG bit values:`);
-			console.log(`      Center (10,10): Base=${baseMods[centerModule][centerModule]}, Green=${greenMods[centerModule][centerModule]}, Red=${redMods[centerModule][centerModule]}`);
-			console.log(`      TL finder (3,3): Base=${baseMods[3][3]}, Green=${greenMods[3][3]}, Red=${redMods[3][3]}`);
-			console.log(`      TR inner (${modules-4},3): Base=${baseMods[3][modules-4]}, Green=${greenMods[3][modules-4]}, Red=${redMods[3][modules-4]}`);
+			console.log(`   DEBUG pixel classification:`);
+			debugPixel(10, 10, 'Center (10,10)');
+			debugPixel(3, 3, 'TL finder (3,3)');
+			debugPixel(modules-4, 3, `TR inner (${modules-4},3)`);
+			debugPixel(12, 12, 'Data area (12,12)');
 		}
 		
 		// Step 4: Enforce finders on all layers
