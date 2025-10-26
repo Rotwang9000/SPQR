@@ -1833,7 +1833,11 @@ function detectSPQR(imageData) {
 			console.log('   ⚠️  CMYRGB palette sampling failed:', e.message);
 			// fallback to sampling below
 		}
+    }
+    
+    console.log(`  After hasGridHint block, about to sample TL finder center...`);
         
+    if (!hasGridHint) {
         console.log(`  Sampling TL finder center for color detection...`);
         
         // Sample the TL finder center (the 3×3 inner square of the finder)
