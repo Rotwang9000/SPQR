@@ -1374,6 +1374,7 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	try {
 		const cmyCal = sampleCMYRGBFinderPalette(id.data, dw, dh, targetModulePx, grid.qrModules, originInROI, originInROI);
 		if (cmyCal && cmyCal.W) {
+			cmyCal._fromCamera = true; // Mark as from camera for decoder
 			window.cameraCalibrationCMY = cmyCal;
 			console.log('Calibrated CMYRGB palette from ROI finders:', cmyCal);
 		}
@@ -1489,7 +1490,11 @@ async function scanFromVideo() {
 			// Provide grid hint and palette calibration from finder refs for decoders
 			window.currentGridHint = { modules: grid.qrModules, modulePx: grid.modulePx, originX: grid.originX, originY: grid.originY };
 			window.cameraCalibration = sampleFinderRefsWithOrigin(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, 4, grid.originX, grid.originY);
-			window.cameraCalibrationCMY = sampleCMYRGBFinderPalette(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, grid.originX, grid.originY);
+			const cmyCal = sampleCMYRGBFinderPalette(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, grid.originX, grid.originY);
+			if (cmyCal) {
+				cmyCal._fromCamera = true; // Mark as from camera for decoder
+				window.cameraCalibrationCMY = cmyCal;
+			}
 			
 			// Attempt SPQR decode on full image (decoder will use hint + calibration)
 			const spqrResult = detectSPQR(imageData);
@@ -3232,8 +3237,10 @@ function decodeCMYRGBLayers(imageData) {
 			'B': hexToRgb(palette[7])  // Blue
 		};
 		
-		// Prefer camera-derived calibration if present (from ROI finder sampling)
-		if (window.cameraCalibrationCMY && window.cameraCalibrationCMY.W) {
+		// Prefer camera-derived calibration ONLY if from actual camera (not file upload)
+		// File uploads should use default/custom palette as they're already clean
+		const fromCamera = window.cameraCalibrationCMY && window.cameraCalibrationCMY._fromCamera;
+		if (fromCamera) {
 			console.log('   Using camera-calibrated CMYRGB palette:', JSON.stringify(window.cameraCalibrationCMY, null, 2));
 			Object.assign(paletteRgb, window.cameraCalibrationCMY);
 		} else {
