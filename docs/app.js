@@ -1341,9 +1341,11 @@ function enhanceImageContrast(rgba, width, height) {
 async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	// Crop ROI around QR, then scale to target module size for robust sampling
 	const roi = extractRoiFromGrid(imageData, grid, 1);
+	console.log(`   📦 ROI extracted: ${roi.width}×${roi.height} from offset (${roi.offsetX},${roi.offsetY}), padding=${roi.paddingPx}px`);
 	const modulesWithMargin = grid.qrModules + 8 + 2; // +2 for padding on each side already included
 	const dw = modulesWithMargin * targetModulePx;
 	const dh = modulesWithMargin * targetModulePx;
+	console.log(`   🔄 Resampling ROI from ${roi.width}×${roi.height} to ${dw}×${dh}`);
 	let scaled = resampleNearest(roi.rgba, roi.width, roi.height, dw, dh);
 	
 	// AGGRESSIVE PREPROCESSING: Only enhance if image looks degraded!
