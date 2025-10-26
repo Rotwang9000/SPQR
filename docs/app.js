@@ -518,17 +518,16 @@ function locateQRStructure(data, width, height) {
     console.log(`locateQRStructure: ${width}x${height} image`);
 	
 	// Brightness-based classification for finder detection
-	// For CMYRGB codes, we need to treat the colored center keys as "dark" 
-	// so the 1:1:3:1:1 pattern is detected correctly
+	// ONLY consider truly BLACK pixels as "dark" for finder detection
+	// Ignore white, colored, and gray pixels
     const isQRPixel = (x, y) => {
         const i = (y * width + x) * 4;
 		const r = data[i], g = data[i+1], b = data[i+2];
 		
-		// White pixels are the ONLY pixels we skip
-		// Everything else (black, colored, gray) is treated as "dark" for pattern detection
-		if (r > 230 && g > 230 && b > 230) return false;
-		
-		return true;
+		// Only BLACK pixels (all channels low) count as "dark"
+		// This ensures we detect the black rings, not the colored centers
+		const threshold = 80;
+		return (r < threshold && g < threshold && b < threshold);
 	};
 	
     const finderCandidates = [];
