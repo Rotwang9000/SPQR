@@ -3378,11 +3378,13 @@ function decodeCMYRGBLayers(imageData) {
 			colorCounts[majorityColor] = (colorCounts[majorityColor] || 0) + 1;
 			
 			// Generator uses: code = (b<<2) | (g<<1) | r
-				// where b=baseQr(bit2), g=greenQr(bit1), r=redQr(bit0)
-				// Palette: W=000, R=001, G=010, Y=011, K=100, M=101, C=110, B=111
-				const bBit = ['K', 'M', 'C', 'B'].includes(majorityColor); // bit 2
-				const gBit = ['G', 'Y', 'C', 'B'].includes(majorityColor); // bit 1
-				const rBit = ['R', 'Y', 'M', 'B'].includes(majorityColor); // bit 0
+				// where b=baseQr(bit2=C), g=greenQr(bit1=M), r=redQr(bit0=Y)
+				// CMYRGB Palette in CMY encoding:
+				// W=000(RGB:FFF), C=100(RGB:0FF), M=010(RGB:F0F), Y=001(RGB:FF0)
+				// R=011(RGB:F00), G=101(RGB:0F0), B=110(RGB:00F), K=111(RGB:000)
+				const bBit = ['C', 'G', 'B', 'K'].includes(majorityColor); // bit 2 = Cyan
+				const gBit = ['M', 'R', 'B', 'K'].includes(majorityColor); // bit 1 = Magenta
+				const rBit = ['Y', 'R', 'G', 'K'].includes(majorityColor); // bit 0 = Yellow
 				
 				baseRow.push(bBit);
 				greenRow.push(gBit);
