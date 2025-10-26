@@ -532,7 +532,7 @@ function locateQRStructure(data, width, height) {
 		// This allows us to detect the black/white rings of finders even when
 		// the center contains colored keys (WRGYKMC B)
 		const chroma = brightness - minBright;
-		if (chroma > 80) return false;  // Skip colored pixels
+		if (chroma > 120 && brightness > 100) return false;  // Skip bright colored pixels
 		
 		// Everything else (black or low-chroma) counts as "dark"
 		return true;
