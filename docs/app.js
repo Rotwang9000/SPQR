@@ -1417,7 +1417,10 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	}
 	// Try SPQR detection on ROI
 	const sp = detectSPQR(id);
-	window.cameraCalibration = null; // Clear after use
+	// Clear grid hint and calibration after use (whether success or failure)
+	window.currentGridHint = null;
+	window.cameraCalibration = null;
+	window.cameraCalibrationCMY = null;
 	if (sp && sp.text) {
 		return { type: 'spqr', text: sp.text, layers: sp.layers };
 	}
