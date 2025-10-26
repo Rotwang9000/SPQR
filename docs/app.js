@@ -1635,6 +1635,12 @@ function sampleFinderRefsWithOrigin(rgba, width, height, modulePx, modulesTotal,
 async function handleFileUpload(e) {
 	const file = e.target.files[0];
 	if (!file) return;
+	
+	// Clear any stale grid hints from camera scans
+	window.currentGridHint = null;
+	window.cameraCalibration = null;
+	window.cameraCalibrationCMY = null;
+	
 	try {
 		const canvas = document.getElementById('canvas');
 		const ctx = canvas.getContext('2d', { willReadFrequently: true });
