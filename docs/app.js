@@ -517,15 +517,24 @@ function estimateGrid(mask, width, height) {
 function locateQRStructure(data, width, height) {
     console.log(`locateQRStructure: ${width}x${height} image`);
 	
-	// Simple brightness-based classification for finder detection
+	// Brightness-based classification that IGNORES colored pixels for finder detection
+	// This is critical for CMYRGB codes which have colored keys in finder centers
     const isQRPixel = (x, y) => {
         const i = (y * width + x) * 4;
 		const r = data[i], g = data[i+1], b = data[i+2];
 		const brightness = Math.max(r, g, b);
 		const minBright = Math.min(r, g, b);
+		
 		// White pixels: very bright and low chroma
 		if (brightness > 230 && minBright > 200) return false;
-		// Everything else (black or colored) counts as "dark" for finder detection
+		
+		// Colored pixels (high chroma): treat as "not dark" for finder detection
+		// This allows us to detect the black/white rings of finders even when
+		// the center contains colored keys (WRGYKMC B)
+		const chroma = brightness - minBright;
+		if (chroma > 80) return false;  // Skip colored pixels
+		
+		// Everything else (black or low-chroma) counts as "dark"
 		return true;
 	};
 	
