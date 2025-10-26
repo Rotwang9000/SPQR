@@ -1371,10 +1371,11 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 		console.log('Calibrated colors from finder patterns:', finderSamples);
 	}
 	// Also calibrate CMYRGB palette from ROI finders (for 3-layer decoding)
+	// NOTE: Don't mark as _fromCamera here - this is called for both camera and file uploads
+	// Only the camera scan loop should mark it as _fromCamera
 	try {
 		const cmyCal = sampleCMYRGBFinderPalette(id.data, dw, dh, targetModulePx, grid.qrModules, originInROI, originInROI);
 		if (cmyCal && cmyCal.W) {
-			cmyCal._fromCamera = true; // Mark as from camera for decoder
 			window.cameraCalibrationCMY = cmyCal;
 			console.log('Calibrated CMYRGB palette from ROI finders:', cmyCal);
 		}
@@ -3260,9 +3261,9 @@ function decodeCMYRGBLayers(imageData) {
 			// Blue  (B): C=1, M=1, Y=0 → RGB(0,0,255)
 			// Black (K): C=1, M=1, Y=1 → RGB(0,0,0)
 			
-			// For calibrated images, use direct distance to palette
-			// For generated codes, use heuristic classification
-			const useCalibrated = window.cameraCalibrationCMY && window.cameraCalibrationCMY.W;
+		// For calibrated images (from camera), use direct distance to palette
+		// For generated codes, use heuristic classification
+		const useCalibrated = window.cameraCalibrationCMY && window.cameraCalibrationCMY._fromCamera;
 			
 			if (useCalibrated) {
 				// Use direct Euclidean distance to calibrated palette
