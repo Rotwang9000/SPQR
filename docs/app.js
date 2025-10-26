@@ -517,31 +517,17 @@ function estimateGrid(mask, width, height) {
 function locateQRStructure(data, width, height) {
     console.log(`locateQRStructure: ${width}x${height} image`);
 	
-	// Brightness-based classification that IGNORES colored pixels for finder detection
-	// This is critical for CMYRGB codes which have colored keys in finder centers
+	// Brightness-based classification for finder detection
+	// For CMYRGB codes, we need to treat the colored center keys as "dark" 
+	// so the 1:1:3:1:1 pattern is detected correctly
     const isQRPixel = (x, y) => {
         const i = (y * width + x) * 4;
 		const r = data[i], g = data[i+1], b = data[i+2];
 		
-		// White pixels: very bright
+		// White pixels are the ONLY pixels we skip
+		// Everything else (black, colored, gray) is treated as "dark" for pattern detection
 		if (r > 230 && g > 230 && b > 230) return false;
 		
-		// Explicitly check for CMYRGB colored pixels (with tolerance of ±50)
-		// These should NOT be treated as "dark" for finder detection
-		const tolerance = 50;
-		const isLow = (v) => v < tolerance;
-		const isHigh = (v) => v > 255 - tolerance;
-		
-		// Cyan (0,255,255), Magenta (255,0,255), Yellow (255,255,0)
-		// Red (255,0,0), Green (0,255,0), Blue (0,0,255)
-		if (isLow(r) && isHigh(g) && isHigh(b)) return false;  // Cyan
-		if (isHigh(r) && isLow(g) && isHigh(b)) return false;  // Magenta
-		if (isHigh(r) && isHigh(g) && isLow(b)) return false;  // Yellow
-		if (isHigh(r) && isLow(g) && isLow(b)) return false;   // Red
-		if (isLow(r) && isHigh(g) && isLow(b)) return false;   // Green
-		if (isLow(r) && isLow(g) && isHigh(b)) return false;   // Blue
-		
-		// Everything else (black or gray) counts as "dark"
 		return true;
 	};
 	
