@@ -522,19 +522,26 @@ function locateQRStructure(data, width, height) {
     const isQRPixel = (x, y) => {
         const i = (y * width + x) * 4;
 		const r = data[i], g = data[i+1], b = data[i+2];
-		const brightness = Math.max(r, g, b);
-		const minBright = Math.min(r, g, b);
 		
-		// White pixels: very bright and low chroma
-		if (brightness > 230 && minBright > 200) return false;
+		// White pixels: very bright
+		if (r > 230 && g > 230 && b > 230) return false;
 		
-		// Colored pixels (high chroma): treat as "not dark" for finder detection
-		// This allows us to detect the black/white rings of finders even when
-		// the center contains colored keys (WRGYKMC B)
-		const chroma = brightness - minBright;
-		if (chroma > 120 && brightness > 100) return false;  // Skip bright colored pixels
+		// Explicitly check for CMYRGB colored pixels (with tolerance of ±50)
+		// These should NOT be treated as "dark" for finder detection
+		const tolerance = 50;
+		const isLow = (v) => v < tolerance;
+		const isHigh = (v) => v > 255 - tolerance;
 		
-		// Everything else (black or low-chroma) counts as "dark"
+		// Cyan (0,255,255), Magenta (255,0,255), Yellow (255,255,0)
+		// Red (255,0,0), Green (0,255,0), Blue (0,0,255)
+		if (isLow(r) && isHigh(g) && isHigh(b)) return false;  // Cyan
+		if (isHigh(r) && isLow(g) && isHigh(b)) return false;  // Magenta
+		if (isHigh(r) && isHigh(g) && isLow(b)) return false;  // Yellow
+		if (isHigh(r) && isLow(g) && isLow(b)) return false;   // Red
+		if (isLow(r) && isHigh(g) && isLow(b)) return false;   // Green
+		if (isLow(r) && isLow(g) && isHigh(b)) return false;   // Blue
+		
+		// Everything else (black or gray) counts as "dark"
 		return true;
 	};
 	

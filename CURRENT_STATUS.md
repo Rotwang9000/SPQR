@@ -169,9 +169,24 @@ TL Finder (modules 2-5):        TR Finder (modules 16-19):
 - **HTML**: `docs/index.html`
 - **Test images**: `test/*.png`
 
+## Current Issue (Updated)
+
+The chroma-based filtering is still not working correctly. Even with adjusted thresholds (chroma > 120 && brightness > 100), only 2 finder candidates are being found instead of 6.
+
+**Problem**: The colored keys (CMYRGB) have varying brightness levels:
+- Cyan (0,255,255): brightness=255, chroma=255
+- Magenta (255,0,255): brightness=255, chroma=255
+- Yellow (255,255,0): brightness=255, chroma=255
+- White (255,255,255): brightness=255, chroma=0
+- Black (0,0,0): brightness=0, chroma=0
+
+The current filter `chroma > 120 && brightness > 100` should skip CMY colors but it's still not finding enough finders.
+
+**New Approach**: Instead of chroma-based filtering, explicitly check if a pixel is one of the 8 CMYRGB colors and skip those for finder detection.
+
 ## Next Steps
 
-1. **Implement Option 1**: Modify `locateQRStructure()` to skip colored pixels in finder detection
+1. **Implement explicit CMYRGB color detection**: Check if pixel matches any of the 8 colors (with tolerance)
 2. **Test with generated code**: Verify origin is now correct (24, 24)
 3. **Test color sampling**: Verify all 8 colors are distinct
 4. **Test decoding**: Verify "SPQR" is decoded correctly
