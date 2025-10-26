@@ -4385,6 +4385,11 @@ function sampleCMYRGBFinderPalette(rgba, width, height, modulePx, modulesTotal, 
 	const trX = modulesTotal - 7;
 	const tr00 = center(trX+2.75, 2.75); const tr10 = center(trX+4.25, 2.75); const tr01 = center(trX+2.75, 4.25); const tr11 = center(trX+4.25, 4.25);
 	
+	console.log(`   🎨 Sampling CMYRGB finder palette:`);
+	console.log(`      originX=${originX}, originY=${originY}, modulePx=${modulePx}, modulesTotal=${modulesTotal}`);
+	console.log(`      TL finder: W@(${tl00.x},${tl00.y}) R@(${tl10.x},${tl10.y}) G@(${tl01.x},${tl01.y}) Y@(${tl11.x},${tl11.y})`);
+	console.log(`      TR finder: K@(${tr00.x},${tr00.y}) M@(${tr10.x},${tr10.y}) C@(${tr01.x},${tr01.y}) B@(${tr11.x},${tr11.y})`);
+	
 	return {
 		W: sample(tl00.x, tl00.y, r), R: sample(tl10.x, tl10.y, r), G: sample(tl01.x, tl01.y, r), Y: sample(tl11.x, tl11.y, r),
 		K: sample(tr00.x, tr00.y, r), M: sample(tr10.x, tr10.y, r), C: sample(tr01.x, tr01.y, r), B: sample(tr11.x, tr11.y, r)
