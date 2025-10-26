@@ -4365,15 +4365,23 @@ function detectSPQRPattern(data, width, height) {
 function sampleCMYRGBFinderPalette(rgba, width, height, modulePx, modulesTotal, originX, originY) {
 	// TL inner 3×3 contains 2×2 grid for W,R,G,Y (at modules 2,3 in the 7×7 finder)
 	// TR inner 3×3 contains 2×2 grid for K,M,C,B
-	// originX/originY already point to module (0,0) of the QR grid
+	// originX/originY point to the top-left corner of the quiet zone
+	// The actual QR code starts at (originX + 4*modulePx, originY + 4*modulePx) assuming 4-module quiet zone
+	// But for generated codes, the quiet zone is part of the image, so we need to account for it
+	// The finder patterns are at module positions (0,0), (modulesTotal-7, 0), (0, modulesTotal-7) within the QR grid
+	// So TL finder is at (originX + 0*modulePx, originY + 0*modulePx) = (originX, originY)
 	const center = (mx,my)=>({ x: originX + Math.round((mx+0.5)*modulePx), y: originY + Math.round((my+0.5)*modulePx) });
 	const sample = (cx,cy,r)=>{ let R=0,G=0,B=0,C=0; for (let y=Math.max(0,cy-r); y<Math.min(height,cy+r); y++){ for(let x=Math.max(0,cx-r); x<Math.min(width,cx+r); x++){ const i=(y*width+x)*4; R+=rgba[i]; G+=rgba[i+1]; B+=rgba[i+2]; C++; }} return C?{r:Math.round(R/C),g:Math.round(G/C),b:Math.round(B/C)}:{r:0,g:0,b:0}; };
 	const r = Math.max(1, Math.floor(modulePx/2));
 	
-	// TL finder: 2×2 colored keys drawn with 1.5 module width each, starting at module (2,2)
-	// Centers are at (2.75, 2.75), (4.25, 2.75), (2.75, 4.25), (4.25, 4.25)
+	// TL finder: 2×2 colored keys drawn with 1.5 module width each, starting at module (2,2) within the finder
+	// The 4 rectangles have centers at (2.75, 2.75), (4.25, 2.75), (2.75, 4.25), (4.25, 4.25) relative to finder origin
+	// Layout: [W R]  (top row: White, Red)
+	//         [G Y]  (bottom row: Green, Yellow)
 	const tl00 = center(2.75, 2.75); const tl10 = center(4.25, 2.75); const tl01 = center(2.75, 4.25); const tl11 = center(4.25, 4.25);
 	// TR finder: starts at module (modulesTotal-7, 0), same offsets
+	// Layout: [K M]  (top row: Black, Magenta)
+	//         [C B]  (bottom row: Cyan, Blue)
 	const trX = modulesTotal - 7;
 	const tr00 = center(trX+2.75, 2.75); const tr10 = center(trX+4.25, 2.75); const tr01 = center(trX+2.75, 4.25); const tr11 = center(trX+4.25, 4.25);
 	
