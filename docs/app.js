@@ -158,6 +158,8 @@ async function generateSpqrClient(text, options) {
 	// Regenerate with fixed version
 	const baseQr = makeQrFixed(targetVersion, baseEC, baseText);
 	const redQr = makeQrFixed(targetVersion, redEC, redText);
+	// In parity mode, generate green layer from parity data
+	const greenQr = (ecMode === 'parity' && isEightColour) ? makeQrFixed(targetVersion, 'L', generateParityData(baseText, redText)) : null;
 
 	const modules = baseQr.getModuleCount();
 	const margin = 4;
@@ -183,16 +185,16 @@ async function generateSpqrClient(text, options) {
 			// Skip finder rings; we'll draw them later to ensure black outline
 			if (isInFinderRing(x, y, modules)) continue;
 			
-			const b = dark(baseQr, x, y) ? 1 : 0;
-			const r = dark(redQr, x, y) ? 1 : 0;
-			
-			let colour = '#ffffff';
-			if (isEightColour) {
-				// CMYRGB: combine base (bit2), green (bit1), red (bit0)
-				const gBit = 0; // TODO: add true green layer when available
-				const code = (b << 2) | (gBit << 1) | r; // 0..7
-				const idxMap = [0,1,2,3,4,5,6,7];
-				colour = colours[idxMap[code]] || '#000000';
+		const b = dark(baseQr, x, y) ? 1 : 0;
+		const r = dark(redQr, x, y) ? 1 : 0;
+		
+		let colour = '#ffffff';
+		if (isEightColour) {
+			// CMYRGB: combine base (bit2), green (bit1), red (bit0)
+			const gBit = greenQr ? (dark(greenQr, x, y) ? 1 : 0) : 0;
+			const code = (b << 2) | (gBit << 1) | r; // 0..7
+			const idxMap = [0,1,2,3,4,5,6,7];
+			colour = colours[idxMap[code]] || '#000000';
 			} else {
 				// 4-colour BWRG mapping using two layers (base, red); green = overlap
 				if (b && r) {
