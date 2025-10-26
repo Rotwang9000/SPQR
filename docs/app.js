@@ -1801,6 +1801,8 @@ function detectSPQR(imageData) {
         console.log(`  Estimated grid: ${modules}×${modules}, ${modulePx}px/module`);
     }
     
+    console.log(`  hasGridHint=${hasGridHint}, proceeding to color detection...`);
+    
 	// Now check if this has color patterns (BWRG vs CMYRGB detection)
 	if (hasGridHint) { // If we have a grid hint, we know it's colored
 		// Prefer robust CMYRGB finder-key palette sampling if available
@@ -1830,6 +1832,8 @@ function detectSPQR(imageData) {
 			console.log('   ⚠️  CMYRGB palette sampling failed:', e.message);
 			// fallback to sampling below
 		}
+        
+        console.log(`  Sampling TL finder center for color detection...`);
         
         // Sample the TL finder center (the 3×3 inner square of the finder)
         // BWRG: solid color in all 9 modules
