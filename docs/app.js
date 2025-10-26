@@ -1374,14 +1374,14 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 		window.cameraCalibration = finderSamples;
 		console.log('Calibrated colors from finder patterns:', finderSamples);
 	}
-	// Also calibrate CMYRGB palette from ROI finders (for 3-layer decoding)
+	// Also calibrate CMYRGB palette from ORIGINAL image (before resampling) to avoid blurring
 	// NOTE: Don't mark as _fromCamera here - this is called for both camera and file uploads
 	// Only the camera scan loop should mark it as _fromCamera
 	try {
-		const cmyCal = sampleCMYRGBFinderPalette(id.data, dw, dh, targetModulePx, grid.qrModules, originInROI, originInROI);
+		const cmyCal = sampleCMYRGBFinderPalette(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, grid.originX, grid.originY);
 		if (cmyCal && cmyCal.W) {
 			window.cameraCalibrationCMY = cmyCal;
-			console.log('Calibrated CMYRGB palette from ROI finders:', cmyCal);
+			console.log('Calibrated CMYRGB palette from ORIGINAL image finders:', cmyCal);
 		}
 	} catch (e) {
 		// ignore calibration errors
