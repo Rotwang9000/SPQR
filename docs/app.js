@@ -4370,7 +4370,9 @@ function sampleCMYRGBFinderPalette(rgba, width, height, modulePx, modulesTotal, 
 	// But for generated codes, the quiet zone is part of the image, so we need to account for it
 	// The finder patterns are at module positions (0,0), (modulesTotal-7, 0), (0, modulesTotal-7) within the QR grid
 	// So TL finder is at (originX + 0*modulePx, originY + 0*modulePx) = (originX, originY)
-	const center = (mx,my)=>({ x: originX + Math.round((mx+0.5)*modulePx), y: originY + Math.round((my+0.5)*modulePx) });
+	// Calculate pixel position of module coordinate (mx, my)
+	// mx and my are already fractional module positions (e.g., 2.75 for the center of a 1.5-module-wide rectangle)
+	const center = (mx,my)=>({ x: Math.round(originX + mx*modulePx), y: Math.round(originY + my*modulePx) });
 	const sample = (cx,cy,r)=>{ let R=0,G=0,B=0,C=0; for (let y=Math.max(0,cy-r); y<Math.min(height,cy+r); y++){ for(let x=Math.max(0,cx-r); x<Math.min(width,cx+r); x++){ const i=(y*width+x)*4; R+=rgba[i]; G+=rgba[i+1]; B+=rgba[i+2]; C++; }} return C?{r:Math.round(R/C),g:Math.round(G/C),b:Math.round(B/C)}:{r:0,g:0,b:0}; };
 	const r = Math.max(1, Math.floor(modulePx/2));
 	
