@@ -3244,39 +3244,22 @@ function decodeCMYRGBLayers(imageData) {
 		// Step 1: Classify pixels using improved color matching for lighting tolerance
 		const classifyPixel = (r, g, b) => {
 			// CMYRGB color mapping (used in generator):
-			// White (W): C=0, M=0, Y=0
-			// Cyan  (C): C=1, M=0, Y=0
-			// Magenta(M):C=0, M=1, Y=0
-			// Yellow(Y): C=0, M=0, Y=1
-			// Red   (R): C=0, M=1, Y=1
-			// Green (G): C=1, M=0, Y=1
-			// Blue  (B): C=1, M=1, Y=0
-			// Black (K): C=1, M=1, Y=1
+			// White (W): C=0, M=0, Y=0 → RGB(255,255,255)
+			// Cyan  (C): C=1, M=0, Y=0 → RGB(0,255,255)
+			// Magenta(M):C=0, M=1, Y=0 → RGB(255,0,255)
+			// Yellow(Y): C=0, M=0, Y=1 → RGB(255,255,0)
+			// Red   (R): C=0, M=1, Y=1 → RGB(255,0,0)
+			// Green (G): C=1, M=0, Y=1 → RGB(0,255,0)
+			// Blue  (B): C=1, M=1, Y=0 → RGB(0,0,255)
+			// Black (K): C=1, M=1, Y=1 → RGB(0,0,0)
 			
-			// Normalise by brightness to handle reflections and lighting variations
-			const brightness = Math.max(r, g, b);
-			const minBright = Math.min(r, g, b);
-			
-			// Extremely bright or dark pixels - check value first
-			if (brightness > 230 && minBright > 200) return 'W'; // Very white
-			if (brightness < 60) return 'K'; // Very black
-			
-			// For coloured pixels, normalise by brightness and use colour ratios
-			// This makes us more tolerant to lighting variations and reflections
+			// Use direct Euclidean distance to calibrated palette
+			// The palette is already calibrated to the actual image colors
 			let minDist = Infinity;
 			let bestColor = 'W';
 			
 			for (const [colorName, rgb] of Object.entries(paletteRgb)) {
-				// Normalise both pixel and palette colour
-				const paletteBright = Math.max(rgb.r, rgb.g, rgb.b) || 1;
-				const pixelBright = brightness || 1;
-				
-				// Calculate distance using normalised ratios
-				const distR = Math.pow((r / pixelBright) - (rgb.r / paletteBright), 2);
-				const distG = Math.pow((g / pixelBright) - (rgb.g / paletteBright), 2);
-				const distB = Math.pow((b / pixelBright) - (rgb.b / paletteBright), 2);
-				const dist = Math.sqrt(distR + distG + distB);
-				
+				const dist = Math.hypot(r - rgb.r, g - rgb.g, b - rgb.b);
 				if (dist < minDist) {
 					minDist = dist;
 					bestColor = colorName;
