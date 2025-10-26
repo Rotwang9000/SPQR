@@ -1805,6 +1805,7 @@ function detectSPQR(imageData) {
     
 	// Now check if this has color patterns (BWRG vs CMYRGB detection)
 	if (hasGridHint) { // If we have a grid hint, we know it's colored
+		console.log(`  Inside hasGridHint block (should not see this if hasGridHint=false)`);
 		// Prefer robust CMYRGB finder-key palette sampling if available
 		try {
 			const cmy = sampleCMYRGBFinderPalette(data, width, height, modulePx, modules, originX, originY);
