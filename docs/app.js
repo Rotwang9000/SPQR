@@ -3253,20 +3253,58 @@ function decodeCMYRGBLayers(imageData) {
 			// Blue  (B): C=1, M=1, Y=0 → RGB(0,0,255)
 			// Black (K): C=1, M=1, Y=1 → RGB(0,0,0)
 			
-			// Use direct Euclidean distance to calibrated palette
-			// The palette is already calibrated to the actual image colors
-			let minDist = Infinity;
-			let bestColor = 'W';
+			// For calibrated images, use direct distance to palette
+			// For generated codes, use heuristic classification
+			const useCalibrated = window.cameraCalibrationCMY && window.cameraCalibrationCMY.W;
 			
-			for (const [colorName, rgb] of Object.entries(paletteRgb)) {
-				const dist = Math.hypot(r - rgb.r, g - rgb.g, b - rgb.b);
-				if (dist < minDist) {
-					minDist = dist;
-					bestColor = colorName;
+			if (useCalibrated) {
+				// Use direct Euclidean distance to calibrated palette
+				let minDist = Infinity;
+				let bestColor = 'W';
+				
+				for (const [colorName, rgb] of Object.entries(paletteRgb)) {
+					const dist = Math.hypot(r - rgb.r, g - rgb.g, b - rgb.b);
+					if (dist < minDist) {
+						minDist = dist;
+						bestColor = colorName;
+					}
 				}
+				
+				return bestColor;
+			} else {
+				// Heuristic classification for generated codes
+				// Check which primary colors are present (threshold at 200 for "on", 100 for "off")
+				const hasR = r > 200;
+				const hasG = g > 200;
+				const hasB = b > 200;
+				const noR = r < 100;
+				const noG = g < 100;
+				const noB = b < 100;
+				
+				// Perfect matches first
+				if (hasR && hasG && hasB) return 'W'; // White: all on
+				if (noR && noG && noB) return 'K';     // Black: all off
+				if (noR && hasG && hasB) return 'C';   // Cyan: G+B, no R
+				if (hasR && noG && hasB) return 'M';   // Magenta: R+B, no G
+				if (hasR && hasG && noB) return 'Y';   // Yellow: R+G, no B
+				if (hasR && noG && noB) return 'R';    // Red: R only
+				if (noR && hasG && noB) return 'G';    // Green: G only
+				if (noR && noG && hasB) return 'B';    // Blue: B only
+				
+				// Fallback to distance-based for ambiguous cases
+				let minDist = Infinity;
+				let bestColor = 'W';
+				
+				for (const [colorName, rgb] of Object.entries(paletteRgb)) {
+					const dist = Math.hypot(r - rgb.r, g - rgb.g, b - rgb.b);
+					if (dist < minDist) {
+						minDist = dist;
+						bestColor = colorName;
+					}
+				}
+				
+				return bestColor;
 			}
-			
-			return bestColor;
 		};
 	
 	// Step 2: Detect grid structure (prefer camera/ROI hint)
