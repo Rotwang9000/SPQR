@@ -89,6 +89,18 @@ All 29 tests should pass:
 - CMYRGB Standard, Hybrid, Parity (12 tests)
 - CMYRGB Custom Colors (7 tests)
 
+### Decoder Testing
+For decoder development and debugging, use the test page:
+```
+docs/test-upload.html
+```
+
+This provides:
+- Generate test QR codes
+- Upload and decode test
+- Real-time console output
+- Isolated testing environment
+
 ### Node.js Tests
 ```bash
 npm test

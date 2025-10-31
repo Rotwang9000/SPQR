@@ -112,37 +112,46 @@ async function generateSpqrClient(text, options) {
 	const ecMode = options.errorCorrection || 'standard';
 
 	// Split payload based on EC mode
-	let baseText, redText;
-	let baseEC = 'L', redEC = 'L';
+	let baseText, redText, greenText;
+	let baseEC = 'L', redEC = 'L', greenEC = 'L';
+	let parityText = null;
 	
 	if (ecMode === 'parity' && isEightColour) {
 		// Parity mode: Use only 2 layers for data, 3rd for parity
 		const parts = splitPayload(text, 2);
 		baseText = parts[0] || '';
 		redText = parts[1] || '';
+		greenText = null; // Will be generated from parity
 		// Generate parity data (simple CRC32 + XOR for now)
-		console.log(`SPQR Parity mode: ${baseText.length} + ${redText.length} bytes data, ${generateParityData(baseText, redText).length} bytes parity`);
+		parityText = generateParityData(baseText, redText);
+		console.log(`SPQR Parity mode: ${baseText.length} + ${redText.length} bytes data, ${parityText.length} bytes parity`);
 	} else if (ecMode === 'hybrid') {
 		// Hybrid mode: First layer gets EC 'M' for critical data
-	const splits = isEightColour ? 3 : 2;
-	const parts = splitPayload(text, splits);
+		const splits = isEightColour ? 3 : 2;
+		const parts = splitPayload(text, splits);
 		baseText = parts[0] || '';
 		redText = parts[1] || '';
+		greenText = isEightColour ? (parts[2] ?? '') : null;
 		baseEC = 'M';  // Base layer gets higher EC
-		console.log(`SPQR Hybrid mode: Base EC 'M' (${baseText.length}b), others EC 'L'`);
+		console.log(`SPQR Hybrid mode: Base EC 'M' (${baseText.length}b), others EC 'L'${isEightColour ? `, green=${greenText?.length || 0}b` : ''}`);
 	} else {
 		// Standard mode: Even split, all EC 'L'
 		const splits = isEightColour ? 3 : 2;
 		const parts = splitPayload(text, splits);
 		baseText = parts[0] || '';
 		redText = parts[1] || '';
-		console.log(`SPQR Standard mode: All layers EC 'L', ${splits} layers`);
+		greenText = isEightColour ? (parts[2] ?? '') : null;
+		console.log(`SPQR Standard mode: All layers EC 'L', ${splits} layers${isEightColour ? ` (${baseText.length}+${greenText?.length || 0}+${redText.length} bytes)` : ''}`);
 	}
 
 	// First pass to find max version needed
 	const encodes = [
 		makeQrAuto(baseText, baseEC),
-		makeQrAuto(redText, redEC)
+		makeQrAuto(redText, redEC),
+		isEightColour ? makeQrAuto(
+			(ecMode === 'parity') ? (parityText || '') : (greenText || ''),
+			(ecMode === 'parity') ? 'L' : greenEC
+		) : null
 	].filter(Boolean);
 	const moduleCounts = encodes.map(qr => qr.getModuleCount());
 	const maxModules = moduleCounts.length ? Math.max.apply(null, moduleCounts) : 21;
@@ -158,8 +167,15 @@ async function generateSpqrClient(text, options) {
 	// Regenerate with fixed version
 	const baseQr = makeQrFixed(targetVersion, baseEC, baseText);
 	const redQr = makeQrFixed(targetVersion, redEC, redText);
-	// In parity mode, generate green layer from parity data
-	const greenQr = (ecMode === 'parity' && isEightColour) ? makeQrFixed(targetVersion, 'L', generateParityData(baseText, redText)) : null;
+	// Generate green layer: parity data, or third data split, or null
+	let greenQr = null;
+	if (isEightColour) {
+		if (ecMode === 'parity') {
+			greenQr = makeQrFixed(targetVersion, 'L', parityText || '');
+		} else {
+			greenQr = makeQrFixed(targetVersion, greenEC, greenText || '');
+		}
+	}
 
 	const modules = baseQr.getModuleCount();
 	const margin = 4;
@@ -193,7 +209,9 @@ async function generateSpqrClient(text, options) {
 			// CMYRGB: combine base (bit2), green (bit1), red (bit0)
 			const gBit = greenQr ? (dark(greenQr, x, y) ? 1 : 0) : 0;
 			const code = (b << 2) | (gBit << 1) | r; // 0..7
-			const idxMap = [0,1,2,3,4,5,6,7];
+			// Map CMY code to palette index [W,R,G,Y,K,M,C,B]
+			// code: 0=W, 1=Y, 2=M, 3=R, 4=C, 5=G, 6=B, 7=K
+			const idxMap = [0, 3, 5, 1, 6, 2, 7, 4];
 			colour = colours[idxMap[code]] || '#000000';
 			} else {
 				// 4-colour BWRG mapping using two layers (base, red); green = overlap
@@ -258,88 +276,204 @@ function splitPayload(payload, splits) {
 
 // Generate parity/checksum data for error detection and recovery
 function generateParityData(data1, data2) {
-	const crc32 = (str) => {
-		let crc = 0xFFFFFFFF;
-		for (let i = 0; i < str.length; i++) {
-			crc ^= str.charCodeAt(i);
-			for (let j = 0; j < 8; j++) {
-				crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
-			}
-		}
-		return (crc ^ 0xFFFFFFFF) >>> 0;
-	};
-	
-	const crc1 = crc32(data1).toString(16).padStart(8, '0');
-	const crc2 = crc32(data2).toString(16).padStart(8, '0');
-	const len1 = data1.length.toString(16).padStart(4, '0');
-	const len2 = data2.length.toString(16).padStart(4, '0');
-	
-	// XOR parity bytes for recovery
-	const maxLen = Math.max(data1.length, data2.length);
-	let xorParity = '';
-	for (let i = 0; i < Math.min(maxLen, 200); i++) {
-		const b1 = i < data1.length ? data1.charCodeAt(i) : 0;
-		const b2 = i < data2.length ? data2.charCodeAt(i) : 0;
-		xorParity += String.fromCharCode(b1 ^ b2);
-	}
-	
-	return `SPQRv1|${len1}|${len2}|${crc1}|${crc2}|${xorParity}`;
+    // Helper: CRC32 over string bytes
+    const crc32 = (str, start = 0, end = str.length) => {
+        let crc = 0xFFFFFFFF;
+        for (let i = start; i < end; i++) {
+            crc ^= str.charCodeAt(i);
+            for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
+        }
+        return (crc ^ 0xFFFFFFFF) >>> 0;
+    };
+    const toHex8 = (n) => n.toString(16).padStart(8, '0');
+    const toHex4 = (n) => n.toString(16).padStart(4, '0');
+    const bytesToBase64 = (bytes) => {
+        let s = '';
+        for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i] & 0xFF);
+        return btoa(s);
+    };
+
+    const len1 = data1.length;
+    const len2 = data2.length;
+    const chunkSize = 64; // bytes per chunk (tweakable)
+    const numChunks = Math.ceil(Math.max(len1, len2) / chunkSize) || 1;
+
+    // Per-chunk CRC lists (hex)
+    const baseCRCs = [];
+    const redCRCs = [];
+    const xorChunksB64 = [];
+
+    for (let c = 0; c < numChunks; c++) {
+        const s1 = c * chunkSize;
+        const e1 = Math.min(len1, s1 + chunkSize);
+        const s2 = c * chunkSize;
+        const e2 = Math.min(len2, s2 + chunkSize);
+
+        // CRCs for available data (0-length chunk is allowed)
+        baseCRCs.push(toHex8(crc32(data1, s1, e1)));
+        redCRCs.push(toHex8(crc32(data2, s2, e2)));
+
+        // XOR chunk
+        const clen = Math.max(e1 - s1, e2 - s2);
+        const xorBytes = new Uint8Array(clen);
+        for (let i = 0; i < clen; i++) {
+            const b1 = (s1 + i) < e1 ? data1.charCodeAt(s1 + i) : 0;
+            const b2 = (s2 + i) < e2 ? data2.charCodeAt(s2 + i) : 0;
+            xorBytes[i] = (b1 ^ b2) & 0xFF;
+        }
+        xorChunksB64.push(bytesToBase64(xorBytes));
+    }
+
+    // Use v2 format with base64 per-chunk XOR; keep v1 decoder for backwards compatibility
+    return `SPQRv2|${chunkSize}|${toHex4(len1)}|${toHex4(len2)}|${baseCRCs.join(',')}|${redCRCs.join(',')}|${xorChunksB64.join(':')}`;
 }
 
 // Verify and recover data using parity layer
 function verifyWithParity(base, red, parityData) {
-	if (!parityData || !parityData.startsWith('SPQRv1|')) {
-		return { valid: false, recovered: null };
-	}
-	
-	const parts = parityData.split('|');
-	if (parts.length < 6) return { valid: false, recovered: null };
-	
-	const len1 = parseInt(parts[1], 16);
-	const len2 = parseInt(parts[2], 16);
-	const expectedCrc1 = parts[3];
-	const expectedCrc2 = parts[4];
-	const xorParity = parts.slice(5).join('|');
-	
-	const crc32 = (str) => {
-		let crc = 0xFFFFFFFF;
-		for (let i = 0; i < str.length; i++) {
-			crc ^= str.charCodeAt(i);
-			for (let j = 0; j < 8; j++) {
-				crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
-			}
-		}
-		return (crc ^ 0xFFFFFFFF) >>> 0;
-	};
-	
-	const actualCrc1 = base ? crc32(base).toString(16).padStart(8, '0') : null;
-	const actualCrc2 = red ? crc32(red).toString(16).padStart(8, '0') : null;
-	
-	const baseValid = base && actualCrc1 === expectedCrc1;
-	const redValid = red && actualCrc2 === expectedCrc2;
-	
-	console.log(`🔍 Parity check: Base ${baseValid ? '✅' : '❌'}, Red ${redValid ? '✅' : '❌'}`);
-	
-	let recovered = null;
-	if (baseValid && !redValid && xorParity) {
-		recovered = { layer: 'red', data: '' };
-		for (let i = 0; i < len2 && i < xorParity.length; i++) {
-			const b1 = i < base.length ? base.charCodeAt(i) : 0;
-			const xor = xorParity.charCodeAt(i);
-			recovered.data += String.fromCharCode(b1 ^ xor);
-		}
-		console.log(`✅ Recovered red layer from parity (${recovered.data.length} bytes)`);
-	} else if (!baseValid && redValid && xorParity) {
-		recovered = { layer: 'base', data: '' };
-		for (let i = 0; i < len1 && i < xorParity.length; i++) {
-			const b2 = i < red.length ? red.charCodeAt(i) : 0;
-			const xor = xorParity.charCodeAt(i);
-			recovered.data += String.fromCharCode(b2 ^ xor);
-		}
-		console.log(`✅ Recovered base layer from parity (${recovered.data.length} bytes)`);
-	}
-	
-	return { valid: baseValid && redValid, baseValid, redValid, recovered };
+    if (!parityData || !parityData.startsWith('SPQRv')) {
+        return { valid: false, recovered: null };
+    }
+
+    const crc32 = (str, start = 0, end = (str ? str.length : 0)) => {
+        let crc = 0xFFFFFFFF;
+        for (let i = start; i < end; i++) {
+            crc ^= str.charCodeAt(i);
+            for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
+        }
+        return (crc ^ 0xFFFFFFFF) >>> 0;
+    };
+    const toHex8 = (n) => n.toString(16).padStart(8, '0');
+    const base64ToBytes = (b64) => {
+        if (!b64) return new Uint8Array(0);
+        const s = atob(b64);
+        const out = new Uint8Array(s.length);
+        for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xFF;
+        return out;
+    };
+
+    if (parityData.startsWith('SPQRv1|')) {
+        const parts = parityData.split('|');
+        if (parts.length < 6) return { valid: false, recovered: null };
+        const len1 = parseInt(parts[1], 16);
+        const len2 = parseInt(parts[2], 16);
+        const expectedCrc1 = parts[3];
+        const expectedCrc2 = parts[4];
+        const xorParity = parts.slice(5).join('|');
+        const actualCrc1 = base ? toHex8(crc32(base)) : null;
+        const actualCrc2 = red ? toHex8(crc32(red)) : null;
+        const baseValid = !!base && actualCrc1 === expectedCrc1;
+        const redValid = !!red && actualCrc2 === expectedCrc2;
+        let recovered = null;
+        if (baseValid && !redValid && xorParity) {
+            let rec = '';
+            for (let i = 0; i < len2 && i < xorParity.length; i++) {
+                const b1 = i < base.length ? base.charCodeAt(i) : 0;
+                const xor = xorParity.charCodeAt(i);
+                rec += String.fromCharCode(b1 ^ xor);
+            }
+            recovered = { layer: 'red', data: rec };
+        } else if (!baseValid && redValid && xorParity) {
+            let rec = '';
+            for (let i = 0; i < len1 && i < xorParity.length; i++) {
+                const b2 = i < red.length ? red.charCodeAt(i) : 0;
+                const xor = xorParity.charCodeAt(i);
+                rec += String.fromCharCode(b2 ^ xor);
+            }
+            recovered = { layer: 'base', data: rec };
+        }
+        return { version: 'v1', valid: baseValid && redValid, baseValid, redValid, recovered };
+    }
+
+    // v2 chunked parity
+    const parts = parityData.split('|');
+    if (parts.length < 7) return { valid: false, recovered: null };
+    const chunkSize = parseInt(parts[1], 10) || 64;
+    const len1 = parseInt(parts[2], 16) || 0;
+    const len2 = parseInt(parts[3], 16) || 0;
+    const baseCrcs = (parts[4] ? parts[4].split(',') : []);
+    const redCrcs = (parts[5] ? parts[5].split(',') : []);
+    const xorChunks = (parts[6] ? parts[6].split(':') : []);
+    const numChunks = Math.max(baseCrcs.length, redCrcs.length, xorChunks.length);
+
+    // Prepare output buffers
+    const baseBytes = new Uint8Array(len1);
+    const redBytes = new Uint8Array(len2);
+
+    const hasBase = typeof base === 'string' && base.length > 0;
+    const hasRed = typeof red === 'string' && red.length > 0;
+
+    let baseValid = true, redValid = true;
+    let baseRecovered = false, redRecovered = false;
+
+    for (let c = 0; c < numChunks; c++) {
+        const s1 = c * chunkSize;
+        const e1 = Math.min(len1, s1 + chunkSize);
+        const s2 = c * chunkSize;
+        const e2 = Math.min(len2, s2 + chunkSize);
+        const xorBytes = base64ToBytes(xorChunks[c] || '');
+
+        // Existing chunks
+        const baseChunk = hasBase ? base.slice(s1, e1) : '';
+        const redChunk = hasRed ? red.slice(s2, e2) : '';
+
+        const baseCrcOk = baseChunk.length === 0 || (toHex8(crc32(baseChunk)) === (baseCrcs[c] || '').padStart(8, '0'));
+        const redCrcOk = redChunk.length === 0 || (toHex8(crc32(redChunk)) === (redCrcs[c] || '').padStart(8, '0'));
+
+        // Copy or reconstruct chunks
+        if (baseChunk && baseCrcOk) {
+            for (let i = 0; i < baseChunk.length; i++) baseBytes[s1 + i] = baseChunk.charCodeAt(i) & 0xFF;
+        } else if (redChunk && redCrcOk && xorBytes.length) {
+            // Recover base chunk = XOR ^ red
+            const clen = Math.max(xorBytes.length, redChunk.length);
+            for (let i = 0; i < clen && (s1 + i) < len1; i++) {
+                const rb = i < redChunk.length ? redChunk.charCodeAt(i) & 0xFF : 0;
+                const xb = i < xorBytes.length ? xorBytes[i] : 0;
+                baseBytes[s1 + i] = (rb ^ xb) & 0xFF;
+            }
+            baseRecovered = true;
+        } else {
+            baseValid = baseValid && (baseChunk.length === 0); // missing data
+        }
+
+        if (redChunk && redCrcOk) {
+            for (let i = 0; i < redChunk.length; i++) redBytes[s2 + i] = redChunk.charCodeAt(i) & 0xFF;
+        } else if (baseChunk && baseCrcOk && xorBytes.length) {
+            // Recover red chunk = XOR ^ base
+            const clen = Math.max(xorBytes.length, baseChunk.length);
+            for (let i = 0; i < clen && (s2 + i) < len2; i++) {
+                const bb = i < baseChunk.length ? baseChunk.charCodeAt(i) & 0xFF : 0;
+                const xb = i < xorBytes.length ? xorBytes[i] : 0;
+                redBytes[s2 + i] = (bb ^ xb) & 0xFF;
+            }
+            redRecovered = true;
+        } else {
+            redValid = redValid && (redChunk.length === 0);
+        }
+    }
+
+    const bytesToString = (bytes) => {
+        let s = '';
+        for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+        return s;
+    };
+
+    const baseOut = len1 ? bytesToString(baseBytes) : '';
+    const redOut = len2 ? bytesToString(redBytes) : '';
+
+    // Validate final CRCs
+    const finalBaseValid = toHex8(crc32(baseOut)) === (baseCrcs[0] ? baseCrcs[0] : toHex8(crc32(baseOut))); // coarse check
+    const finalRedValid = toHex8(crc32(redOut)) === (redCrcs[0] ? redCrcs[0] : toHex8(crc32(redOut)));
+
+    return {
+        version: 'v2',
+        valid: finalBaseValid && finalRedValid,
+        baseValid: finalBaseValid,
+        redValid: finalRedValid,
+        baseRecovered,
+        redRecovered,
+        base: baseOut,
+        red: redOut
+    };
 }
 
 function makeQrAuto(text, ecc) {
@@ -1679,11 +1813,20 @@ async function handleFileUpload(e) {
 				window.cameraCalibrationCMY = null;
 			}
 			// Fallback: SPQR detect full image
-			const spqrResult = detectSPQR(imageData);
-			if (spqrResult) {
-				displayScanResult({ standard: null, spqr: spqrResult });
-			} else {
-				displayScanResult({ standard: null, spqr: { base: null, red: null, combined: null } });
+			try {
+				console.log('📸 Attempting SPQR detection on full image...');
+				const spqrResult = detectSPQR(imageData);
+				if (spqrResult) {
+					console.log('✅ SPQR detection succeeded');
+					displayScanResult({ standard: null, spqr: spqrResult });
+				} else {
+					console.log('❌ SPQR detection returned null');
+					displayScanResult({ standard: null, spqr: { base: null, red: null, combined: null } });
+				}
+			} catch (error) {
+				console.error('❌ SPQR detection threw error:', error);
+				console.error('Stack:', error.stack);
+				displayScanResult({ standard: null, spqr: { base: `Error: ${error.message}`, red: null, combined: null } });
 			}
 		};
 		img.onerror = function() { alert('Error loading image file'); };
@@ -1803,42 +1946,43 @@ function detectSPQR(imageData) {
     
     console.log(`  hasGridHint=${hasGridHint}, proceeding to color detection...`);
     
-	// Now check if this has color patterns (BWRG vs CMYRGB detection)
-	if (hasGridHint) { // If we have a grid hint, we know it's colored
-		console.log(`  Inside hasGridHint block (should not see this if hasGridHint=false)`);
-		// Prefer robust CMYRGB finder-key palette sampling if available
-		try {
-			const cmy = sampleCMYRGBFinderPalette(data, width, height, modulePx, modules, originX, originY);
-			if (cmy && cmy.W && cmy.R && cmy.G && cmy.Y && cmy.K && cmy.M && cmy.C && cmy.B) {
-				console.log('   CMYRGB palette sampled:', JSON.stringify(cmy, null, 2));
-				const dist = (a,b)=>Math.hypot(a.r-b.r,a.g-b.g,a.b-b.b);
-				// Distinctiveness in TL 2x2 (W,R,G,Y) and TR 2x2 (K,M,C,B)
-				const tlDists = [dist(cmy.W,cmy.R), dist(cmy.W,cmy.G), dist(cmy.W,cmy.Y), dist(cmy.R,cmy.G), dist(cmy.R,cmy.Y), dist(cmy.G,cmy.Y)];
-				const trDists = [dist(cmy.K,cmy.M), dist(cmy.K,cmy.C), dist(cmy.K,cmy.B), dist(cmy.M,cmy.C), dist(cmy.M,cmy.B), dist(cmy.C,cmy.B)];
-				// For degraded images, use lower threshold (30px instead of 50px) and require fewer pairs (2 instead of 3)
-				const threshold = 30;
-				const tlDistinct = tlDists.filter(d=>d>threshold).length;
-				const trDistinct = trDists.filter(d=>d>threshold).length;
-				console.log(`   TL distinctiveness: ${tlDistinct}/6 pairs > ${threshold}px distance (${tlDists.map(d=>Math.round(d)).join(', ')})`);
-				console.log(`   TR distinctiveness: ${trDistinct}/6 pairs > ${threshold}px distance (${trDists.map(d=>Math.round(d)).join(', ')})`);
-				if (tlDistinct >= 2 && trDistinct >= 2) {
-					console.log('CMYRGB (8-color, 3-layer) SPQR detected via finder-key palette');
-					if (savedGridHint) window.currentGridHint = savedGridHint;
-					return decodeCMYRGBLayers(imageData);
-				} else {
-					console.log(`   ⚠️  Not enough distinctiveness for CMYRGB (need 2+2, got ${tlDistinct}+${trDistinct}), trying BWRG...`);
+    try {
+		// Now check if this has color patterns (BWRG vs CMYRGB detection)
+		if (hasGridHint) { // If we have a grid hint, we know it's colored
+			console.log(`  Inside hasGridHint block (should not see this if hasGridHint=false)`);
+			// Prefer robust CMYRGB finder-key palette sampling if available
+			try {
+				const cmy = sampleCMYRGBFinderPalette(data, width, height, modulePx, modules, originX, originY);
+				if (cmy && cmy.W && cmy.R && cmy.G && cmy.Y && cmy.K && cmy.M && cmy.C && cmy.B) {
+					console.log('   CMYRGB palette sampled:', JSON.stringify(cmy, null, 2));
+					const dist = (a,b)=>Math.hypot(a.r-b.r,a.g-b.g,a.b-b.b);
+					// Distinctiveness in TL 2x2 (W,R,G,Y) and TR 2x2 (K,M,C,B)
+					const tlDists = [dist(cmy.W,cmy.R), dist(cmy.W,cmy.G), dist(cmy.W,cmy.Y), dist(cmy.R,cmy.G), dist(cmy.R,cmy.Y), dist(cmy.G,cmy.Y)];
+					const trDists = [dist(cmy.K,cmy.M), dist(cmy.K,cmy.C), dist(cmy.K,cmy.B), dist(cmy.M,cmy.C), dist(cmy.M,cmy.B), dist(cmy.C,cmy.B)];
+					// For degraded images, use lower threshold (30px instead of 50px) and require fewer pairs (2 instead of 3)
+					const threshold = 30;
+					const tlDistinct = tlDists.filter(d=>d>threshold).length;
+					const trDistinct = trDists.filter(d=>d>threshold).length;
+					console.log(`   TL distinctiveness: ${tlDistinct}/6 pairs > ${threshold}px distance (${tlDists.map(d=>Math.round(d)).join(', ')})`);
+					console.log(`   TR distinctiveness: ${trDistinct}/6 pairs > ${threshold}px distance (${trDists.map(d=>Math.round(d)).join(', ')})`);
+					if (tlDistinct >= 2 && trDistinct >= 2) {
+						console.log('CMYRGB (8-color, 3-layer) SPQR detected via finder-key palette');
+						if (savedGridHint) window.currentGridHint = savedGridHint;
+						return decodeCMYRGBLayers(imageData);
+					} else {
+						console.log(`   ⚠️  Not enough distinctiveness for CMYRGB (need 2+2, got ${tlDistinct}+${trDistinct}), trying BWRG...`);
+					}
 				}
+			} catch (e) {
+				console.log('   ⚠️  CMYRGB palette sampling failed:', e.message);
+				// fallback to sampling below
 			}
-		} catch (e) {
-			console.log('   ⚠️  CMYRGB palette sampling failed:', e.message);
-			// fallback to sampling below
 		}
-    }
-    
-    console.log(`  After hasGridHint block, about to sample TL finder center...`);
-        
-    if (!hasGridHint) {
-        console.log(`  Sampling TL finder center for color detection...`);
+		
+		console.log(`  After hasGridHint block, about to sample TL finder center...`);
+			
+		if (!hasGridHint) {
+			console.log(`  Sampling TL finder center for color detection...`);
         
         // Sample the TL finder center (the 3×3 inner square of the finder)
         // BWRG: solid color in all 9 modules
@@ -1900,9 +2044,15 @@ function detectSPQR(imageData) {
             if (savedGridHint) window.currentGridHint = savedGridHint;
             return decodeSPQRLayers(imageData);
         }
-    }
-    
-    return null;
+		}
+		
+		console.log(`  Reached end of detectSPQR color detection`);
+		return null;
+	} catch (error) {
+		console.error('❌ detectSPQR error:', error);
+		console.error('Stack trace:', error.stack);
+		throw error; // Re-throw to see it in the console
+	}
 }
 
 // SPQR decoder with known grid structure (fallback when jsQR fails)
@@ -3388,29 +3538,30 @@ function decodeCMYRGBLayers(imageData) {
 			bestModulePx = testModulePx;
 			bestModules = testModules;
 		}
-	}
-	
-	// If we have multiple good candidates, prefer smaller module counts
-	// (QR codes use the smallest version that fits the data)
-	let modules = bestModules;
-	let modulePx = Math.round(bestModulePx);
-	
-	if (candidates.length > 0) {
-		// Sort with priority: standard module sizes (5px BWRG, 6px CMYRGB), then best fit
-		candidates.sort((a, b) => {
-			const aIsStandard = (a.roundedPx === 5 || a.roundedPx === 6);
-			const bIsStandard = (b.roundedPx === 5 || b.roundedPx === 6);
-			
-			if (aIsStandard && !bIsStandard) return -1;
-			if (!aIsStandard && bIsStandard) return 1;
-			
-			// If both are standard, prefer exact fit (remainder=0) or smaller remainder
-			return a.remainder - b.remainder;
-		});
+		}
 		
-		modules = candidates[0].modules;
-		modulePx = candidates[0].roundedPx;
-	}
+		// If we have multiple good candidates, prefer smaller module counts
+		// (QR codes use the smallest version that fits the data)
+		modules = bestModules;
+		modulePx = Math.round(bestModulePx);
+		
+		if (candidates.length > 0) {
+			// Sort with priority: standard module sizes (5px BWRG, 6px CMYRGB), then best fit
+			candidates.sort((a, b) => {
+				const aIsStandard = (a.roundedPx === 5 || a.roundedPx === 6);
+				const bIsStandard = (b.roundedPx === 5 || b.roundedPx === 6);
+				
+				if (aIsStandard && !bIsStandard) return -1;
+				if (!aIsStandard && bIsStandard) return 1;
+				
+				// If both are standard, prefer exact fit (remainder=0) or smaller remainder
+				return a.remainder - b.remainder;
+			});
+			
+			modules = candidates[0].modules;
+			modulePx = candidates[0].roundedPx;
+		}
+		
 		originX = margin * modulePx;
 		originY = margin * modulePx;
 		console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module`);
@@ -3813,38 +3964,100 @@ if (!baseText && !greenText && !redText) {
 	}
 }
 	
-	// Check if this is parity mode (green layer starts with SPQRv1|)
-		let combined = null;
-		let parityInfo = null;
-		
-		if (greenText && greenText.startsWith('SPQRv1|')) {
-			// Parity mode: green is parity data
-			console.log('🔐 Parity mode detected, verifying...');
-			const verification = verifyWithParity(baseText, redText, greenText);
-			parityInfo = verification;
+			// Check if this is parity mode (green layer starts with SPQRv*)
+			let combined = null;
+			let parityInfo = null;
 			
-			if (verification.recovered) {
-				// One layer was corrupt but recovered
-				const recoveredBase = verification.recovered.layer === 'base' ? verification.recovered.data : baseText;
-				const recoveredRed = verification.recovered.layer === 'red' ? verification.recovered.data : redText;
-				combined = recoveredBase + recoveredRed;
-				console.log(`✅ Data recovered using parity: ${combined.length} bytes`);
-			} else if (verification.valid) {
-				// Both layers intact
-				combined = (baseText || '') + (redText || '');
-				console.log(`✅ Data verified with parity: ${combined.length} bytes`);
-			} else {
-				// Both layers corrupt, can't recover
-				console.log(`❌ Parity recovery failed - need at least 1 valid data layer`);
-				// But still try to return whatever we have
-				if (baseText || redText) {
+			if (greenText && greenText.startsWith('SPQRv')) {
+				console.log('🔐 Parity mode detected, verifying...');
+				const verification = verifyWithParity(baseText, redText, greenText);
+				parityInfo = verification;
+				if (verification.version === 'v2') {
+					// Use reconstructed/corrected outputs when available
+					baseText = verification.base || baseText || '';
+					redText = verification.red || redText || '';
 					combined = (baseText || '') + (redText || '');
-					console.log(`⚠️  Returning partial data (${combined.length} bytes)`);
+					if (verification.baseRecovered || verification.redRecovered) {
+						console.log(`✅ Chunk-level recovery used (baseRecovered=${!!verification.baseRecovered}, redRecovered=${!!verification.redRecovered})`);
+					} else if (verification.valid) {
+						console.log(`✅ Parity verified (no recovery needed)`);
+					} else {
+						console.log(`⚠️  Parity verification indeterminate; returning best-effort data`);
+					}
 				} else {
-					combined = null;
+					// v1 behaviour
+					if (verification.recovered) {
+						const recoveredBase = verification.recovered.layer === 'base' ? verification.recovered.data : baseText;
+						const recoveredRed = verification.recovered.layer === 'red' ? verification.recovered.data : redText;
+						combined = (recoveredBase || '') + (recoveredRed || '');
+						console.log(`✅ Data recovered using parity: ${combined.length} bytes`);
+					} else if (verification.valid) {
+						combined = (baseText || '') + (redText || '');
+						console.log(`✅ Data verified with parity: ${combined.length} bytes`);
+					} else {
+						console.log(`❌ Parity recovery failed - need at least 1 valid data layer`);
+						if (baseText || redText) {
+							combined = (baseText || '') + (redText || '');
+							console.log(`⚠️  Returning partial data (${combined.length} bytes)`);
+						} else {
+							combined = null;
+						}
+					}
 				}
-			}
-		} else {
+			} else if (baseText || redText) {
+				// Attempt to decode parity from green layer using raw extraction if jsQR failed
+				console.log('🧩 Trying raw extraction of parity layer due to failed layer(s)...');
+				const extractRawBits = (mods) => {
+					const n = mods.length; const bits = [];
+					const inFinder = (x, y) => (x < 9 && y < 9) || (x >= n-8 && y < 9) || (x < 9 && y >= n-8);
+					const inTiming = (x, y) => (x === 6 || y === 6);
+					const inDarkModule = (x, y) => (x === 8 && y === n-8);
+					const skipCell = (x, y) => inFinder(x, y) || inTiming(x, y) || inDarkModule(x, y);
+					let upward = true;
+					for (let col = n-1; col > 0; col -= 2) {
+						if (col === 6) col--;
+						const c1 = col, c2 = col - 1;
+						const yStart = upward ? n-1 : 0; const yEnd = upward ? -1 : n; const yStep = upward ? -1 : 1;
+						for (let y = yStart; y !== yEnd; y += yStep) {
+							for (const x of [c1, c2]) { if (!skipCell(x, y)) bits.push(mods[y][x] ? 1 : 0); }
+						}
+						upward = !upward;
+					}
+					return bits;
+				};
+				const decodeBits = (bits) => {
+					try {
+						const mode = ((bits[0]<<3)|(bits[1]<<2)|(bits[2]<<1)|bits[3])>>>0;
+						if (mode === 0b0010) { // alphanumeric
+							let count=0; for (let i=4;i<13;i++) count=(count<<1)|bits[i];
+							const table='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:'; let s=''; let i=13;
+							for (let k=0;k<Math.floor(count/2);k++){ let v=0; for(let j=0;j<11;j++) v=(v<<1)|(bits[i++]||0); s+=table[Math.floor(v/45)]+table[v%45]; }
+							if (count%2===1){ let v=0; for(let j=0;j<6;j++) v=(v<<1)|(bits[i++]||0); s+=table[v]; }
+							return s;
+						}
+						if (mode === 0b0100) { // byte
+							let count=0; for (let i=4;i<12;i++) count=(count<<1)|bits[i]; let i=12; const out=[];
+							for (let k=0;k<count; k++){ let v=0; for(let j=0;j<8;j++) v=(v<<1)|(bits[i++]||0); out.push(v&0xFF);} 
+							return new TextDecoder('utf-8').decode(new Uint8Array(out));
+						}
+					} catch(e) {}
+					return null;
+				};
+				const baseRaw = baseText ? baseText : decodeBits(extractRawBits(baseMods));
+				const redRaw  = redText  ? redText  : decodeBits(extractRawBits(redMods));
+				const greenRaw= decodeBits(extractRawBits(greenMods));
+				if (greenRaw && greenRaw.startsWith('SPQRv')) {
+					console.log('🔐 Parity (raw) obtained; attempting recovery');
+					const verification = verifyWithParity(baseRaw||'', redRaw||'', greenRaw);
+					parityInfo = verification;
+					if (verification.version === 'v2') {
+						baseText = verification.base || baseText || '';
+						redText  = verification.red  || redText  || '';
+						combined = (baseText||'') + (redText||'');
+						console.log('✅ Parity recovery applied (v2)');
+					}
+				}
+			} else {
 			// Standard or hybrid mode: all 3 layers are data
 			// In standard/hybrid mode, return data even if some layers failed
 			const hasAnyData = baseText || redText || greenText;

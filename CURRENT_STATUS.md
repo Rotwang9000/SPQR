@@ -1,6 +1,6 @@
 # SPQR Decoder - Current Status
 
-## Date: 2025-10-26
+## Date: 2025-10-28 (CRITICAL FIXES)
 
 ## Where We Are
 
@@ -12,7 +12,9 @@ We are working on fixing the decoder for SPQR codes, specifically 3-layer CMYRGB
    
 2. **Latest Issue**: The finder detection is now correctly identifying that it cannot find enough finder patterns (only 2 out of 6 needed) when the threshold for "black" pixels is set to 80. This is actually GOOD because it means the function is falling back to grid estimation, which correctly calculates `21×21, 6px/module`.
 
-3. **Current Problem**: After the grid is estimated, the decoding process appears to stop or fail silently. The console logs end abruptly after "Estimated grid: 21×21, 6px/module".
+3. **Error Handling Enhancement (2025-10-28)**: Added comprehensive try-catch error handling to `detectSPQR` function to catch and log any exceptions that might be stopping execution. Added explicit logging at every major step to trace execution flow.
+
+4. **Current Problem**: After the grid is estimated, the decoding process appears to stop or fail silently. The console logs end abruptly after "Estimated grid: 21×21, 6px/module". The new error handling should help identify if this is due to an exception being thrown.
 
 ## What We Are Trying To Do
 
@@ -111,4 +113,56 @@ We are working on fixing the decoder for SPQR codes, specifically 3-layer CMYRGB
 
 ## Next Immediate Action
 
-Add comprehensive console logging to `detectSPQR` after the grid estimation to trace where the execution is stopping or failing. Then continue fixing the issues until clean code decoding works.
+**🔥 SECOND CRITICAL BUG FIXED (2025-10-28d)**: 
+
+The third layer (green) wasn't being used in standard and hybrid modes! The code was splitting the payload into 3 parts but only using 2:
+```javascript
+greenText = (isEightColour && parts[2]) ? parts[2] : null;
+```
+
+In standard/hybrid modes, `greenQr` was always `null`, meaning the middle bit was always 0. This resulted in only 4 colors being used instead of 8, and the third of the data was lost!
+
+**Fixed by**:
+- Properly assigning `greenText` from `parts[2]` in standard/hybrid modes
+- Creating `greenQr` from `greenText` when not in parity mode
+- Now all three layers are properly encoded with actual data
+
+This explains why the generated codes only showed yellow, green, cyan (limited color palette) - only 2 of the 3 bits were varying!
+
+---
+
+**🔥 CRITICAL ENCODER BUG FIXED (2025-10-28c)**: 
+
+The encoder had an incorrect colour mapping array (line 196):
+```javascript
+const idxMap = [0,1,2,3,4,5,6,7];  // WRONG!
+```
+
+This was causing the encoder to produce QR codes with incorrect colours. The CMY bit pattern wasn't mapping to the correct palette indices [W,R,G,Y,K,M,C,B].
+
+**Fixed to**:
+```javascript
+const idxMap = [0, 3, 5, 1, 6, 2, 7, 4];  // CORRECT
+```
+
+This maps:
+- code 0 (000) = W → palette[0] = White
+- code 1 (001) = Y → palette[3] = Yellow
+- code 2 (010) = M → palette[5] = Magenta
+- code 3 (011) = R → palette[1] = Red
+- code 4 (100) = C → palette[6] = Cyan
+- code 5 (101) = G → palette[2] = Green
+- code 6 (110) = B → palette[7] = Blue
+- code 7 (111) = K → palette[4] = Black
+
+**⚠️ IMPORTANT**: Any CMYRGB codes generated before these fixes will NOT work correctly. They must be regenerated with the fixed encoder.
+
+**Testing Required**:
+1. Hard refresh browser (Ctrl+Shift+R)
+2. **Generate a NEW CMYRGB QR code** (type "SPQR" and generate)
+3. You should now see ALL 8 colors being used (W, R, G, Y, K, M, C, B)
+4. Download the PNG
+5. Upload it back and verify it decodes correctly
+6. The decoded text should match exactly
+
+**Version**: Updated to `v=20251028d`

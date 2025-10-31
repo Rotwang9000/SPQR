@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>SPQR Decode Test</title>
+	<style>
+		body {
+			font-family: Arial, sans-serif;
+			max-width: 800px;
+			margin: 50px auto;
+			padding: 20px;
+		}
+		.test-section {
+			margin: 30px 0;
+			padding: 20px;
+			border: 2px solid #ddd;
+			border-radius: 8px;
+		}
+		#console-output {
+			background: #1e1e1e;
+			color: #d4d4d4;
+			padding: 15px;
+			border-radius: 5px;
+			font-family: 'Courier New', monospace;
+			font-size: 12px;
+			max-height: 400px;
+			overflow-y: auto;
+			white-space: pre-wrap;
+		}
+		.success { color: #4caf50; }
+		.error { color: #f44336; }
+		.info { color: #2196f3; }
+		button {
+			padding: 10px 20px;
+			margin: 5px;
+			font-size: 14px;
+			cursor: pointer;
+		}
+		canvas {
+			border: 1px solid #ccc;
+			margin: 10px 0;
+		}
+	</style>
+</head>
+<body>
+	<h1>🧪 SPQR Decoder Test</h1>
+	
+	<div class="test-section">
+		<h2>Step 1: Generate Test QR Code</h2>
+		<input type="text" id="testText" value="SPQR" style="width: 300px; padding: 8px;">
+		<button onclick="generateTestCode()">Generate CMYRGB QR</button>
+		<button onclick="downloadTestCode()">Download PNG</button>
+		<br><br>
+		<canvas id="testCanvas"></canvas>
+	</div>
+	
+	<div class="test-section">
+		<h2>Step 2: Upload and Decode</h2>
+		<input type="file" id="fileInput" accept="image/*">
+		<br><br>
+		<canvas id="uploadCanvas"></canvas>
+		<div id="decodeResult"></div>
+	</div>
+	
+	<div class="test-section">
+		<h2>Console Output</h2>
+		<button onclick="clearConsole()">Clear</button>
+		<div id="console-output"></div>
+	</div>
+	
+	<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+	<script src="vendor/qrcodegen.min.js"></script>
+	<script src="app.js?v=20251028a"></script>
+	
+	<script>
+		// Override console.log to show in our output div
+		const consoleOutput = document.getElementById('console-output');
+		const originalLog = console.log;
+		const originalError = console.error;
+		
+		console.log = function(...args) {
+			originalLog.apply(console, args);
+			const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : a).join(' ');
+			consoleOutput.innerHTML += `<span class="info">${msg}</span>\n`;
+			consoleOutput.scrollTop = consoleOutput.scrollHeight;
+		};
+		
+		console.error = function(...args) {
+			originalError.apply(console, args);
+			const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : a).join(' ');
+			consoleOutput.innerHTML += `<span class="error">❌ ${msg}</span>\n`;
+			consoleOutput.scrollTop = consoleOutput.scrollHeight;
+		};
+		
+		function clearConsole() {
+			consoleOutput.innerHTML = '';
+		}
+		
+		async function generateTestCode() {
+			const text = document.getElementById('testText').value || 'SPQR';
+			console.log(`\n=== Generating CMYRGB QR for: "${text}" ===`);
+			
+			try {
+				// Use the SPQR generator from app.js
+				const result = await generateSpqrClient(text, { 
+					type: 'cmyrgb', 
+					margin: 4 
+				});
+				
+				const canvas = document.getElementById('testCanvas');
+				const ctx = canvas.getContext('2d');
+				
+				// Parse the SVG and draw to canvas
+				const img = new Image();
+				img.onload = function() {
+					canvas.width = img.width;
+					canvas.height = img.height;
+					ctx.drawImage(img, 0, 0);
+					console.log(`✅ Generated ${canvas.width}×${canvas.height}px CMYRGB QR code`);
+				};
+				img.src = 'data:image/svg+xml;base64,' + btoa(result.cmyrgb);
+			} catch (error) {
+				console.error('Generation error:', error);
+			}
+		}
+		
+		function downloadTestCode() {
+			const canvas = document.getElementById('testCanvas');
+			if (!canvas.width) {
+				alert('Generate a QR code first!');
+				return;
+			}
+			const link = document.createElement('a');
+			link.download = 'spqr-test.png';
+			link.href = canvas.toDataURL();
+			link.click();
+		}
+		
+		document.getElementById('fileInput').addEventListener('change', async function(e) {
+			const file = e.target.files[0];
+			if (!file) return;
+			
+			console.log(`\n=== Uploading file: ${file.name} ===`);
+			
+			try {
+				const canvas = document.getElementById('uploadCanvas');
+				const ctx = canvas.getContext('2d', { willReadFrequently: true });
+				const img = new Image();
+				
+				img.onload = async function() {
+					canvas.width = img.width;
+					canvas.height = img.height;
+					ctx.imageSmoothingEnabled = false;
+					ctx.drawImage(img, 0, 0);
+					
+					console.log(`Image loaded: ${canvas.width}×${canvas.height}px`);
+					
+					const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+					
+					// Try standard QR first
+					console.log('Trying standard QR decode...');
+					const code = jsQR(imageData.data, imageData.width, imageData.height, { 
+						inversionAttempts: 'attemptBoth' 
+					});
+					
+					if (code && code.data) {
+						console.log('✅ Standard QR decoded:', code.data);
+						document.getElementById('decodeResult').innerHTML = 
+							`<h3 style="color: green;">✅ Standard QR Code</h3><p>${code.data}</p>`;
+						return;
+					}
+					
+					console.log('Standard QR failed, trying SPQR detection...');
+					
+					// Try SPQR detection
+					const spqrResult = detectSPQR(imageData);
+					
+					if (spqrResult) {
+						console.log('✅ SPQR decoded:', spqrResult);
+						let html = '<h3 style="color: green;">✅ SPQR Code</h3>';
+						if (spqrResult.base) html += `<p><strong>Base:</strong> ${spqrResult.base}</p>`;
+						if (spqrResult.red) html += `<p><strong>Red:</strong> ${spqrResult.red}</p>`;
+						if (spqrResult.green) html += `<p><strong>Green:</strong> ${spqrResult.green}</p>`;
+						if (spqrResult.combined) html += `<p><strong>Combined:</strong> ${spqrResult.combined}</p>`;
+						document.getElementById('decodeResult').innerHTML = html;
+					} else {
+						console.log('❌ SPQR detection returned null');
+						document.getElementById('decodeResult').innerHTML = 
+							'<h3 style="color: red;">❌ Decode Failed</h3><p>Check console for details</p>';
+					}
+				};
+				
+				img.onerror = function() {
+					console.error('Error loading image file');
+				};
+				
+				img.src = URL.createObjectURL(file);
+			} catch (error) {
+				console.error('Upload error:', error);
+			}
+		});
+		
+		console.log('🧪 SPQR Decoder Test Page Loaded');
+		console.log('📋 Instructions:');
+		console.log('1. Generate a test QR code');
+		console.log('2. Download it as PNG');
+		console.log('3. Upload it back to test decoding');
+	</script>
+</body>
+</html>
+
