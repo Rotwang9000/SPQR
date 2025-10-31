@@ -1376,6 +1376,56 @@ let lastScanState = { found: false, decoded: false, lastUpdate: 0 };
 let lastDecodedText = null;
 let scanPauseUntil = 0;
 
+// Camera decode orchestration and quality
+let scanGeneration = 0; // increments per scheduled decode
+let currentDecodeGen = 0; // active decode token
+let bestFrameQuality = 0; // best quality observed recently
+let parityAggregator = {
+    mode: null, // 'parity'|'standard'|'hybrid'
+    base: null,
+    red: null,
+    parity: null,
+};
+
+function resetParityAggregator() {
+    parityAggregator.mode = null;
+    parityAggregator.base = null;
+    parityAggregator.red = null;
+    parityAggregator.parity = null;
+}
+
+function updateParityAggregatorWithSpqr(spqrObj) {
+    if (!spqrObj || typeof spqrObj !== 'object') return null;
+    // Accept decoded layer strings if present
+    const maybeBase = spqrObj.base || null;
+    const maybeRed = spqrObj.red || null;
+    const maybeGreen = spqrObj.green || null;
+    // Parity string lives in green when parity mode is used
+    const isParityString = (s) => typeof s === 'string' && s.startsWith('SPQRv');
+    if (maybeBase && (!parityAggregator.base || maybeBase.length > parityAggregator.base.length)) parityAggregator.base = maybeBase;
+    if (maybeRed && (!parityAggregator.red || maybeRed.length > parityAggregator.red.length)) parityAggregator.red = maybeRed;
+    if (isParityString(maybeGreen)) parityAggregator.parity = maybeGreen;
+    if (isParityString(spqrObj.combined)) {
+        // Some flows may incorrectly put parity in combined; ignore unless starts with SPQRv
+        parityAggregator.parity = spqrObj.combined;
+    }
+    // Attempt aggregation when we have parity and at least one layer
+    if (parityAggregator.parity && (parityAggregator.base || parityAggregator.red)) {
+        try {
+            const verification = verifyWithParity(parityAggregator.base || '', parityAggregator.red || '', parityAggregator.parity);
+            if (verification && (verification.version === 'v2' || verification.recovered || verification.valid)) {
+                const baseOut = verification.base || parityAggregator.base || '';
+                const redOut = verification.red || parityAggregator.red || '';
+                const combined = baseOut + redOut;
+                return { combined, base: baseOut || null, red: redOut || null, parityInfo: verification };
+            }
+        } catch (e) {
+            console.log('Parity aggregation error:', e.message);
+        }
+    }
+    return null;
+}
+
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
 function extractRoiFromGrid(imageData, grid, paddingModules = 1) {
@@ -1558,8 +1608,8 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	window.currentGridHint = null;
 	window.cameraCalibration = null;
 	window.cameraCalibrationCMY = null;
-	if (sp && sp.text) {
-		return { type: 'spqr', text: sp.text, layers: sp.layers };
+	if (sp) {
+		return { type: 'spqr', spqr: sp };
 	}
 	return null;
 }
@@ -1623,7 +1673,7 @@ async function scanFromVideo() {
 		
 		// No direct decode - try to locate structure using our finder analysis
 		const grid = locateQRStructure(imageData.data, imageData.width, imageData.height);
-		if (grid && grid.qrModules && grid.modulePx) {
+        if (grid && grid.qrModules && grid.modulePx) {
 			// Found structure - show orange box
 			drawGridRect(overlayCtx, grid.originX, grid.originY, (grid.qrModules + 8) * grid.modulePx, (grid.qrModules + 8) * grid.modulePx, '#ff9900');
 			status.textContent = '⚠️  QR structure found - trying SPQR decode...';
@@ -1639,24 +1689,12 @@ async function scanFromVideo() {
 				window.cameraCalibrationCMY = cmyCal;
 			}
 			
-			// Attempt SPQR decode on full image (decoder will use hint + calibration)
-			const spqrResult = detectSPQR(imageData);
-			if (spqrResult && spqrResult.text) {
-				status.textContent = `✅ SPQR decoded! (${spqrResult.layers || '?' } layers)`;
-				status.style.background = 'rgba(0, 200, 0, 0.8)';
-				lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
-				if (spqrResult.text !== lastDecodedText) {
-					lastDecodedText = spqrResult.text;
-					handleScannedCode(spqrResult.text);
-				}
-				// Pause briefly then continue scanning
-				scanPauseUntil = Date.now() + 1500;
-				requestAnimationFrame(scanFromVideo);
-				return;
-			} else {
-				status.textContent = '❌ QR found but decode failed - try better lighting/focus';
-				status.style.background = 'rgba(200, 0, 0, 0.8)';
-			}
+            // Compute quality and schedule heavy decode attempts; cancel older ones if a better frame arrives
+            const quality = computeFrameQuality(imageData, grid);
+            console.log(`   📊 Frame quality score: ${Math.round(quality)} (best=${Math.round(bestFrameQuality)})`);
+            if (quality >= bestFrameQuality * 0.98) {
+                scheduleDecodeFromGrid(imageData, grid, quality);
+            }
 		} else {
 			// No QR structure found at all
 			const now = Date.now();
@@ -1701,6 +1739,80 @@ function drawGridRect(ctx, x, y, w, h, color = '#ff9900') {
 	ctx.strokeStyle = color;
 	ctx.lineWidth = 3;
 	ctx.strokeRect(Math.max(0,x), Math.max(0,y), Math.max(0,w), Math.max(0,h));
+}
+
+// Compute a simple frame quality score to prioritise better frames for heavy decoding
+function computeFrameQuality(imageData, grid) {
+    const { data, width, height } = imageData;
+    // Contrast proxy: max channel minus min channel across a subsample
+    let minV = 255, maxV = 0; let step = Math.max(1, Math.floor(Math.min(width,height)/128));
+    for (let y = 0; y < height; y += step) {
+        for (let x = 0; x < width; x += step) {
+            const i = (y*width + x) * 4;
+            const v = Math.max(data[i], data[i+1], data[i+2]);
+            if (v < minV) minV = v; if (v > maxV) maxV = v;
+        }
+    }
+    const contrast = maxV - minV; // 0..255
+    // Sharpness proxy: edge magnitude over small sample (Sobel-ish)
+    let sharp = 0; let samples = 0;
+    for (let y = 1; y < height-1; y += step*2) {
+        for (let x = 1; x < width-1; x += step*2) {
+            const i = (y*width + x) * 4;
+            const gx = (data[i+4]-data[i-4]) + (data[i+4*width]-data[i-4*width]);
+            const gy = (data[i+4*width]-data[i-4*width]) + (data[i+4]-data[i-4]);
+            sharp += Math.abs(gx) + Math.abs(gy); samples++;
+        }
+    }
+    const sharpness = samples ? sharp / samples : 0;
+    // Grid confidence: presence of grid increases score
+    const gridBonus = grid && grid.qrModules ? Math.min(1, grid.qrModules/57) * 50 : 0; // + up to 50
+    // Colorfulness: ratio of colored pixels over a sample
+    let colored = 0, total = 0;
+    for (let y = 0; y < height; y += step*2) {
+        for (let x = 0; x < width; x += step*2) {
+            const i = (y*width + x) * 4;
+            const r = data[i], g = data[i+1], b = data[i+2];
+            const isBlack = r<50&&g<50&&b<50; const isWhite = r>200&&g>200&&b>200;
+            if (!isBlack && !isWhite) colored++; total++;
+        }
+    }
+    const colorRatio = total ? (colored/total) : 0;
+    return contrast + sharpness*0.01 + gridBonus + colorRatio*200;
+}
+
+// Schedule a heavy decode for this frame/grid, cancelling previous if a better one appears
+async function scheduleDecodeFromGrid(imageData, grid, quality) {
+    const gen = ++scanGeneration; currentDecodeGen = gen; bestFrameQuality = Math.max(bestFrameQuality, quality);
+    try {
+        // Try multiple target module sizes for robustness
+        const targets = [8, 10, 12];
+        for (const target of targets) {
+            if (currentDecodeGen !== gen) return; // superseded by a better frame
+            const result = await decodeFromGridROI(imageData, grid, target);
+            if (currentDecodeGen !== gen) return;
+            if (result) {
+                if (result.type === 'standard') {
+                    displayScanResult({ standard: result.text, spqr: null });
+                    return;
+                }
+                // SPQR rich result
+                if (result.spqr) {
+                    // Try multi-frame aggregation if parity mode
+                    const aggregated = updateParityAggregatorWithSpqr(result.spqr);
+                    if (aggregated && aggregated.combined) {
+                        displayScanResult({ standard: null, spqr: { base: aggregated.base, red: aggregated.red, combined: aggregated.combined, parity: aggregated.parityInfo } });
+                        return;
+                    }
+                    // Otherwise show partial
+                    displayScanResult({ standard: null, spqr: { base: result.spqr.base || null, red: result.spqr.red || null, green: result.spqr.green || null, combined: result.spqr.combined || null, parity: result.spqr.parity || null } });
+                    return;
+                }
+            }
+        }
+    } catch (e) {
+        console.log('Decode scheduler error:', e.message);
+    }
 }
 
 function sampleFinderRefsWithOrigin(rgba, width, height, modulePx, modulesTotal, marginModules, originX, originY) {
