@@ -195,6 +195,18 @@ async function generateSpqrClient(text, options) {
 	// White background
 	svg += `<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`;
 
+	// Focus assistance patterns (high-contrast targets for phone autofocus on flat screens)
+	// Add corner brackets in margin (2px thick lines in top-left corner)
+	const focusSize = Math.max(12, Math.floor(margin * cell * 0.3));
+	const focusStroke = Math.max(1, Math.floor(cell * 0.4));
+	svg += `<path d="M ${focusSize},${focusStroke/2} L ${focusStroke/2},${focusStroke/2} L ${focusStroke/2},${focusSize}" stroke="#000" stroke-width="${focusStroke}" fill="none"/>`;
+	svg += `<path d="M ${width-focusSize},${focusStroke/2} L ${width-focusStroke/2},${focusStroke/2} L ${width-focusStroke/2},${focusSize}" stroke="#000" stroke-width="${focusStroke}" fill="none"/>`;
+	svg += `<path d="M ${focusSize},${height-focusStroke/2} L ${focusStroke/2},${height-focusStroke/2} L ${focusStroke/2},${height-focusSize}" stroke="#000" stroke-width="${focusStroke}" fill="none"/>`;
+	svg += `<path d="M ${width-focusSize},${height-focusStroke/2} L ${width-focusStroke/2},${height-focusStroke/2} L ${width-focusStroke/2},${height-focusSize}" stroke="#000" stroke-width="${focusStroke}" fill="none"/>`;
+	// Add text label "SPQR" at bottom margin (high-frequency pattern for phase-detect AF)
+	const fontSize = Math.max(8, Math.floor(margin * cell * 0.6));
+	svg += `<text x="${width/2}" y="${height - fontSize/2}" font-family="monospace" font-size="${fontSize}" font-weight="bold" text-anchor="middle" fill="#888">SPQR</text>`;
+
 	// Draw modules
 	for (let y = 0; y < modules; y++) {
 		for (let x = 0; x < modules; x++) {
@@ -1354,13 +1366,24 @@ async function toggleCamera() {
 			preview.style.display = 'block';
 			
 			currentStream = await navigator.mediaDevices.getUserMedia({ 
-				video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
+				video: { 
+					facingMode: 'environment', 
+					width: { ideal: 1920 }, 
+					height: { ideal: 1080 },
+					advanced: [
+						{ focusMode: 'continuous' },
+						{ pointsOfInterest: [{ x: 0.5, y: 0.5 }] }
+					]
+				} 
 			});
 			video.srcObject = currentStream;
 			await video.play(); // Wait for video to start playing
 			btn.textContent = '🛑 Stop Camera';
 			
 			status.textContent = '📷 Scanning... Point camera at QR code';
+			
+			// Try to enable camera controls: autofocus/zoom/torch if supported
+			try { initCameraControls(currentStream, video); } catch (e) { /* ignore */ }
 			
 			// Start scanning
 			scanFromVideo();
@@ -1385,6 +1408,9 @@ let parityAggregator = {
     base: null,
     red: null,
     parity: null,
+    baseBlocks: new Map(), // RS block cache: blockIdx -> { data, locked }
+    redBlocks: new Map(),
+    greenBlocks: new Map(),
 };
 
 function resetParityAggregator() {
@@ -1392,6 +1418,57 @@ function resetParityAggregator() {
     parityAggregator.base = null;
     parityAggregator.red = null;
     parityAggregator.parity = null;
+    parityAggregator.baseBlocks.clear();
+    parityAggregator.redBlocks.clear();
+    parityAggregator.greenBlocks.clear();
+}
+
+// Per-block reconstruction for standard/hybrid 3-layer codes
+function attemptBlockReconstruction(layerName, blockMap) {
+    if (blockMap.size === 0) return null;
+    const blocks = Array.from(blockMap.values()).sort((a, b) => a.blockIdx - b.blockIdx);
+    let combined = '';
+    for (const blk of blocks) if (blk.data && blk.locked) combined += blk.data;
+    if (combined.length > 0) {
+        console.log(`   🧩 ${layerName}: reconstructed ${combined.length} bytes from ${blocks.length} locked blocks`);
+        return combined;
+    }
+    return null;
+}
+
+function updateBlockAggregatorWithSpqr(spqrObj) {
+    if (!spqrObj || typeof spqrObj !== 'object') return null;
+    let updated = false;
+    // Lock layers as blocks when they decode successfully
+    if (spqrObj.base && typeof spqrObj.base === 'string' && spqrObj.base.length > 0) {
+        if (!parityAggregator.base || spqrObj.base.length >= parityAggregator.base.length) {
+            parityAggregator.base = spqrObj.base;
+            parityAggregator.baseBlocks.set(0, { blockIdx: 0, data: spqrObj.base, locked: true });
+            updated = true;
+        }
+    }
+    if (spqrObj.red && typeof spqrObj.red === 'string' && spqrObj.red.length > 0) {
+        if (!parityAggregator.red || spqrObj.red.length >= parityAggregator.red.length) {
+            parityAggregator.red = spqrObj.red;
+            parityAggregator.redBlocks.set(0, { blockIdx: 0, data: spqrObj.red, locked: true });
+            updated = true;
+        }
+    }
+    if (spqrObj.green && typeof spqrObj.green === 'string' && spqrObj.green.length > 0) {
+        parityAggregator.greenBlocks.set(0, { blockIdx: 0, data: spqrObj.green, locked: true });
+        updated = true;
+    }
+    if (updated) {
+        const baseRec = attemptBlockReconstruction('Base', parityAggregator.baseBlocks);
+        const redRec = attemptBlockReconstruction('Red', parityAggregator.redBlocks);
+        const greenRec = attemptBlockReconstruction('Green', parityAggregator.greenBlocks);
+        if (baseRec || redRec || greenRec) {
+            const combined = (baseRec || parityAggregator.base || '') + (redRec || parityAggregator.red || '') + (greenRec || '');
+            console.log(`   📦 Block aggregation: ${combined.length} bytes total`);
+            return { base: baseRec || parityAggregator.base, red: redRec || parityAggregator.red, green: greenRec, combined };
+        }
+    }
+    return null;
 }
 
 function updateParityAggregatorWithSpqr(spqrObj) {
@@ -1741,6 +1818,54 @@ function drawGridRect(ctx, x, y, w, h, color = '#ff9900') {
 	ctx.strokeRect(Math.max(0,x), Math.max(0,y), Math.max(0,w), Math.max(0,h));
 }
 
+// Camera controls: focus/zoom/torch and tap-to-focus
+function initCameraControls(stream, video) {
+    const track = stream.getVideoTracks()[0];
+    if (!track || typeof track.getCapabilities !== 'function') return;
+    const caps = track.getCapabilities();
+    const settings = track.getSettings ? track.getSettings() : {};
+
+    // Try continuous focus
+    if (caps.focusMode && caps.focusMode.includes('continuous')) {
+        track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(()=>{});
+    }
+
+    // Expose tap-to-focus on overlay
+    const overlayCanvas = document.getElementById('overlay-canvas');
+    if (overlayCanvas) {
+        overlayCanvas.style.cursor = 'crosshair';
+        overlayCanvas.addEventListener('click', async (e) => {
+            const rect = overlayCanvas.getBoundingClientRect();
+            const x = (e.clientX - rect.left) / rect.width;
+            const y = (e.clientY - rect.top) / rect.height;
+            try {
+                const constraints = { advanced: [] };
+                if (caps.pointsOfInterest) constraints.advanced.push({ pointsOfInterest: [{ x, y }] });
+                if (caps.focusMode && caps.focusMode.includes('single-shot')) constraints.advanced.push({ focusMode: 'single-shot' });
+                if (constraints.advanced.length) await track.applyConstraints(constraints);
+            } catch (err) {
+                console.log('Tap-to-focus not supported:', err.message);
+            }
+        });
+    }
+
+    // Try enabling torch if supported (expose via keyboard 't')
+    if (caps.torch) {
+        window.addEventListener('keydown', async (ev) => {
+            if (ev.key.toLowerCase() === 't') {
+                try { await track.applyConstraints({ advanced: [{ torch: !(settings.torch || false) }] }); } catch {}
+            }
+        });
+    }
+
+    // Zoom assistance: auto-zoom slightly if available to help macro focus
+    if (typeof caps.zoom === 'number' || (caps.zoom && caps.zoom.max)) {
+        const min = caps.zoom.min || 1; const max = caps.zoom.max || 3; const cur = settings.zoom || min;
+        const target = Math.min(max, Math.max(min, cur * 1.2));
+        track.applyConstraints({ advanced: [{ zoom: target }] }).catch(()=>{});
+    }
+}
+
 // Compute a simple frame quality score to prioritise better frames for heavy decoding
 function computeFrameQuality(imageData, grid) {
     const { data, width, height } = imageData;
@@ -1798,10 +1923,16 @@ async function scheduleDecodeFromGrid(imageData, grid, quality) {
                 }
                 // SPQR rich result
                 if (result.spqr) {
-                    // Try multi-frame aggregation if parity mode
-                    const aggregated = updateParityAggregatorWithSpqr(result.spqr);
-                    if (aggregated && aggregated.combined) {
-                        displayScanResult({ standard: null, spqr: { base: aggregated.base, red: aggregated.red, combined: aggregated.combined, parity: aggregated.parityInfo } });
+                    // Try parity aggregation first (for parity mode)
+                    const parityAgg = updateParityAggregatorWithSpqr(result.spqr);
+                    if (parityAgg && parityAgg.combined) {
+                        displayScanResult({ standard: null, spqr: { base: parityAgg.base, red: parityAgg.red, combined: parityAgg.combined, parity: parityAgg.parityInfo } });
+                        return;
+                    }
+                    // Try block aggregation (for standard/hybrid 3-layer)
+                    const blockAgg = updateBlockAggregatorWithSpqr(result.spqr);
+                    if (blockAgg && blockAgg.combined) {
+                        displayScanResult({ standard: null, spqr: { base: blockAgg.base, red: blockAgg.red, green: blockAgg.green, combined: blockAgg.combined } });
                         return;
                     }
                     // Otherwise show partial
