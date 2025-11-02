@@ -2276,17 +2276,25 @@ function detectSPQR(imageData) {
         
         // CMYRGB has 2x2 grid with 4 colors in TL finder
         // BWRG has solid color (1-2 colors due to sampling noise)
-        if (uniqueColors >= 3) {
-            console.log('CMYRGB (8-color, 3-layer) SPQR detected');
-            // Restore grid hint for decoder
+        // BUT: be more aggressive - try CMYRGB first if we have >= 2 distinct colors
+        // because degraded images may lose color distinction
+        console.log(`  Color clusters: ${JSON.stringify(clusters.map(c => ({r:c.r,g:c.g,b:c.b})))}`);
+        
+        if (uniqueColors >= 2) {
+            // Try CMYRGB first - it will fall back if palette fails
+            console.log(`🎨 Detected ${uniqueColors} colors, attempting CMYRGB (8-color, 3-layer) decode...`);
             if (savedGridHint) window.currentGridHint = savedGridHint;
-            return decodeCMYRGBLayers(imageData);
-        } else {
-            console.log('BWRG (4-color, 2-layer) SPQR detected');
-            // Restore grid hint for decoder
-            if (savedGridHint) window.currentGridHint = savedGridHint;
-            return decodeSPQRLayers(imageData);
+            const cmyResult = decodeCMYRGBLayers(imageData);
+            if (cmyResult && (cmyResult.base || cmyResult.red || cmyResult.green)) {
+                console.log('✅ CMYRGB decode succeeded');
+                return cmyResult;
+            }
+            console.log('⚠️  CMYRGB decode failed, trying BWRG...');
+            // Fall through to BWRG
         }
+        console.log('🎨 Attempting BWRG (4-color, 2-layer) decode...');
+        if (savedGridHint) window.currentGridHint = savedGridHint;
+        return decodeSPQRLayers(imageData);
 		}
 		
 		console.log(`  Reached end of detectSPQR color detection`);
@@ -3616,7 +3624,9 @@ function decodeSPQRLayers(imageData) {
 			base: baseText,
 			red: redText,
 			combined: combined || null,
-			partial: combined ? null : 'Decode failed'
+			partial: combined ? null : 'Decode failed',
+			mode: 'BWRG',
+			layerType: 'BWRG'
 		};
 		
 	} catch (error) {
@@ -4315,12 +4325,22 @@ if (!baseText && !greenText && !redText) {
 			}
 		}
 		
+		// Determine mode for UI feedback
+		let detectedMode = 'standard';
+		if (greenText && greenText.startsWith('SPQRv')) {
+			detectedMode = 'parity';
+		} else if (greenText && greenText.length > 0) {
+			detectedMode = 'hybrid'; // 3 data layers
+		}
+		
             return {
 			base: baseText,
 			green: greenText,
 			red: redText,
                 combined: combined || null,
-			parity: parityInfo
+			parity: parityInfo,
+			mode: detectedMode,
+			layerType: 'CMYRGB'
 		};
 		
     } catch (error) {
@@ -4352,14 +4372,77 @@ function displayScanResult(result) {
         </div>`;
     }
     
-    if (result.spqr && (result.spqr.base || result.spqr.red || result.spqr.combined)) {
-        textToUse = result.spqr.combined || result.spqr.base || '';
-        const layers = [result.spqr.base, result.spqr.red, result.spqr.green].filter(Boolean).length;
-        const parityInfo = result.spqr.parity ? ' (with parity recovery)' : '';
-        html += `<div class="scan-result-item success">
-            <strong>✅ SPQR ${layers}-layer QR Code decoded${parityInfo}!</strong><br>
-            <small>${textToUse.length} characters</small>
-                </div>`;
+    if (result.spqr) {
+        const hasBase = result.spqr.base && result.spqr.base.length > 0 && !result.spqr.base.startsWith('Error:');
+        const hasRed = result.spqr.red && result.spqr.red.length > 0;
+        const hasGreen = result.spqr.green && result.spqr.green.length > 0;
+        const hasParity = result.spqr.parity || (result.spqr.green && result.spqr.green.startsWith && result.spqr.green.startsWith('SPQRv'));
+        
+        // Determine mode - prefer decoder-provided mode
+        let mode = result.spqr.mode || 'unknown';
+        let layerType = result.spqr.layerType || 'SPQR';
+        let layerCount = layerType === 'BWRG' ? 2 : 3;
+        
+        // Fallback to inference if mode not provided
+        if (mode === 'unknown') {
+            if (hasParity) {
+                mode = 'parity';
+                layerCount = 3;
+            } else if (hasGreen) {
+                mode = 'standard/hybrid';
+                layerCount = 3;
+            } else if (hasBase || hasRed) {
+                mode = 'BWRG';
+                layerCount = 2;
+            }
+        }
+        
+        // Build layer status display
+        let layerStatus = '<div style="margin: 8px 0; font-family: monospace; font-size: 14px;">';
+        if (layerCount === 3) {
+            layerStatus += `<span style="color: ${hasBase ? '#0a0' : '#a00'}">⬛ Base ${hasBase ? '✓' : '✗'}</span> `;
+            layerStatus += `<span style="color: ${hasRed ? '#0a0' : '#a00'}">🟥 Red ${hasRed ? '✓' : '✗'}</span> `;
+            if (hasParity) {
+                layerStatus += `<span style="color: ${hasParity ? '#0a0' : '#a00'}">🟩 Parity ${hasParity ? '✓' : '✗'}</span>`;
+            } else {
+                layerStatus += `<span style="color: ${hasGreen ? '#0a0' : '#a00'}">🟩 Green ${hasGreen ? '✓' : '✗'}</span>`;
+            }
+        } else if (layerCount === 2) {
+            layerStatus += `<span style="color: ${hasBase ? '#0a0' : '#a00'}">⬛ Base ${hasBase ? '✓' : '✗'}</span> `;
+            layerStatus += `<span style="color: ${hasRed ? '#0a0' : '#a00'}">🟥 Red ${hasRed ? '✓' : '✗'}</span>`;
+        }
+        layerStatus += '</div>';
+        
+        if (result.spqr.combined) {
+            textToUse = result.spqr.combined;
+            const successCount = [hasBase, hasRed, hasGreen || hasParity].filter(Boolean).length;
+            // Better mode labels
+            let modeLabel = layerType;
+            if (mode === 'parity') modeLabel += ' Parity';
+            else if (mode === 'hybrid') modeLabel += ' Hybrid';
+            else if (mode === 'standard') modeLabel += ' Standard';
+            html += `<div class="scan-result-item success">
+                <strong>✅ SPQR ${modeLabel} decoded! (${successCount}/${layerCount} layers)</strong><br>
+                ${layerStatus}
+                <small>${textToUse.length} characters total</small>
+            </div>`;
+        } else if (hasBase || hasRed || hasGreen) {
+            // Partial decode
+            textToUse = (result.spqr.base || '') + (result.spqr.red || '') + (result.spqr.green || '');
+            const successCount = [hasBase, hasRed, hasGreen].filter(Boolean).length;
+            const modeLabel = layerCount === 3 ? '3-layer' : '2-layer';
+            html += `<div class="scan-result-item warning">
+                <strong>⚠️  SPQR ${modeLabel} partially decoded (${successCount}/${layerCount} layers)</strong><br>
+                ${layerStatus}
+                <small>${textToUse.length} characters recovered (may be incomplete)</small>
+            </div>`;
+        } else {
+            html += `<div class="scan-result-item error">
+                <strong>❌ SPQR decode failed</strong><br>
+                ${layerStatus}
+                <small>No layers could be decoded. Try a clearer image or better lighting.</small>
+            </div>`;
+        }
     }
     
     if (!result.standard && (!result.spqr || (!result.spqr.base && !result.spqr.red && !result.spqr.combined))) {
@@ -4367,6 +4450,20 @@ function displayScanResult(result) {
             <strong>❌ No QR Code Found</strong><br>
             Make sure the image contains a clear, readable QR code.<br>
             <small>💡 Tip: Try better lighting or a clearer image.</small>
+        </div>`;
+    }
+    
+    // Show aggregator status if active
+    if (parityAggregator.base || parityAggregator.red || parityAggregator.parity) {
+        const aggBase = parityAggregator.baseBlocks.size > 0;
+        const aggRed = parityAggregator.redBlocks.size > 0;
+        const aggGreen = parityAggregator.greenBlocks.size > 0;
+        const aggParity = parityAggregator.parity != null;
+        html += `<div style="margin-top: 8px; padding: 8px; background: #f0f8ff; border-left: 3px solid #4a90e2; font-size: 12px;">
+            <strong>📦 Multi-frame aggregator:</strong><br>
+            <span style="color: ${aggBase ? '#0a0' : '#666'}">⬛ ${aggBase ? 'Locked' : 'Empty'}</span> 
+            <span style="color: ${aggRed ? '#0a0' : '#666'}">🟥 ${aggRed ? 'Locked' : 'Empty'}</span> 
+            <span style="color: ${aggGreen || aggParity ? '#0a0' : '#666'}">🟩 ${aggGreen || aggParity ? 'Locked' : 'Empty'}</span>
         </div>`;
     }
     

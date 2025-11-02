@@ -1,5 +1,49 @@
 # SPQR Decoder - Current Status
 
+## Date: 2025-11-01 (LAYER DETECTION & UI FEEDBACK)
+
+### Recent Changes
+
+1. **Improved Layer Detection (2025-11-01a)**:
+   - Made CMYRGB detection more aggressive: now tries CMYRGB first if ≥2 distinct colours detected in finder center (was ≥3)
+   - Falls back to BWRG if CMYRGB decode fails, preventing misidentification
+   - Added detailed console logging of colour clusters for debugging
+   - Decoders now return `mode` and `layerType` fields for accurate UI display
+
+2. **Visual "Puzzle Piece" Feedback**:
+   - UI now shows individual layer status with coloured checkmarks: ⬛ Base ✓/✗, 🟥 Red ✓/✗, 🟩 Green/Parity ✓/✗
+   - Displays detected mode (BWRG, CMYRGB Standard/Hybrid/Parity) from decoder
+   - Shows multi-frame aggregator status (which layers are locked across frames)
+   - Added warning style for partial decodes (yellow background)
+   - Clear visual distinction between full decode, partial decode, and total failure
+
+3. **Per-Block Reconstruction (for standard/hybrid 3-layer)**:
+   - Added `baseBlocks`, `redBlocks`, `greenBlocks` maps to track locked RS blocks across camera frames
+   - Multi-frame scanning now builds complete message from individual block successes
+   - Console logs show "🧩 Layer: reconstructed N bytes from M locked blocks"
+   - **Advantage**: 3-layer codes have lower density per layer, making them easier to scan than parity mode
+
+4. **Focus Assistance Patterns**:
+   - Added corner brackets (L-shaped black lines in all 4 corners)
+   - Added "SPQR" text label at bottom margin
+   - These high-contrast patterns help phone autofocus systems (both phase-detect and contrast-detect) lock onto flat screens
+   - Users report focus is better now
+
+### Current Status
+
+- Focus assistance is working well
+- Detection has improved (finding more codes)
+- Layer status display provides clear feedback
+- But: Still occasional decode failures where code is detected as wrong layer type (e.g. 3-layer detected as 1-layer)
+
+### Next Steps
+
+- Test with various lighting conditions and camera angles
+- Monitor console logs for layer detection accuracy
+- Verify multi-frame block aggregation is working as expected
+
+---
+
 ## Date: 2025-10-28 (CRITICAL FIXES)
 
 ## Where We Are
