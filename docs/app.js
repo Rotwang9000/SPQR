@@ -1,6 +1,19 @@
 // SPQR Web App
 let currentStream = null;
 
+// Helper function to smoothly scroll an element into view
+function smoothScrollToElement(element, offset = 0) {
+	if (!element) return;
+	
+	const elementPosition = element.getBoundingClientRect().top + window.pageYOffset;
+	const offsetPosition = elementPosition - offset;
+	
+	window.scrollTo({
+		top: offsetPosition,
+		behavior: 'smooth'
+	});
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     // Check if required libraries are available
     if (typeof jsQR === 'undefined') {
@@ -45,6 +58,19 @@ function setupEventListeners() {
 // Custom colors storage
 window.bwrgColors = null;
 window.cmyrgbColors = null;
+
+const CMYRGB_COLOR_CODES = {
+	W: 0b000,
+	Y: 0b001,
+	M: 0b010,
+	R: 0b011,
+	C: 0b100,
+	G: 0b101,
+	B: 0b110,
+	K: 0b111
+};
+
+const CMYRGB_INDEX_TO_COLOR = ['W', 'Y', 'M', 'R', 'C', 'G', 'B', 'K'];
 
 let generateDebounce = null;
 function onTextChanged(e) {
@@ -339,7 +365,6 @@ function generateParityData(data1, data2) {
     // Use v2 format with base64 per-chunk XOR; keep v1 decoder for backwards compatibility
     return `SPQRv2|${chunkSize}|${toHex4(len1)}|${toHex4(len2)}|${baseCRCs.join(',')}|${redCRCs.join(',')}|${xorChunksB64.join(':')}`;
 }
-
 // Verify and recover data using parity layer
 function verifyWithParity(base, red, parityData) {
     if (!parityData || !parityData.startsWith('SPQRv')) {
@@ -484,10 +509,12 @@ function verifyWithParity(base, red, parityData) {
         baseRecovered,
         redRecovered,
         base: baseOut,
-        red: redOut
+        red: redOut,
+        chunkSize,
+        baseCrcs,
+        redCrcs
     };
 }
-
 function makeQrAuto(text, ecc) {
 	const qr = qrcode(0, ecc);
 	qr.addData(text);
@@ -632,7 +659,6 @@ function estimateModulePx(width, height, mask) {
 	modulePx = Math.max(3, Math.min(20, modulePx|0));
 	return modulePx || null;
 }
-
 function estimateGrid(mask, width, height) {
 	const modulePx = estimateModulePx(width, height, mask) || Math.max(3, Math.min(20, Math.round(width/29)));
 	let minX = width, minY = height, maxX = 0, maxY = 0;
@@ -658,7 +684,6 @@ function estimateGrid(mask, width, height) {
 	const totalModules = Math.min(usableModulesX, usableModulesY);
 	return { modulePx, originX, originY, totalModules };
 }
-
 // Locate QR structure directly from colored SPQR image
 function locateQRStructure(data, width, height) {
     console.log(`locateQRStructure: ${width}x${height} image`);
@@ -927,7 +952,6 @@ function rgbaToDataUrl(width, height, rgba) {
     ctx.putImageData(imageData, 0, 0);
     return canvas.toDataURL('image/png');
 }
-
 function displayResults(standard, bwrg, cmyrgb) {
     console.log('Displaying results:', { standard, bwrg, cmyrgb });
     const resultDiv = document.getElementById('result');
@@ -1160,7 +1184,6 @@ function toggleBWRGColors() {
         section.style.display = section.style.display === 'none' ? 'block' : 'none';
     }
 }
-
 function toggleCMYRGBColors() {
     const section = document.getElementById('cmyrgbColorsSection');
     if (section) {
@@ -1284,7 +1307,6 @@ function resetBWRGColors() {
     window.bwrgColors = null;
     updateBWRGColors();
 }
-
 function resetCMYRGBColors() {
     const defaults = {
         white: '#ffffff', red: '#ff0000', green: '#00ff00', yellow: '#ffff00',
@@ -1359,11 +1381,17 @@ async function toggleCamera() {
 		currentStream = null;
 		preview.style.display = 'none';
 		btn.textContent = '📷 Use Camera';
+		resetParityAggregator();
+		bestFrameQuality = 0;
+		lastFrameQualityMetrics = null;
 	} else {
 		// Start camera
 		try {
 			status.textContent = 'Starting camera...';
 			preview.style.display = 'block';
+			
+			// Scroll to camera preview after a brief delay to ensure it's rendered
+			setTimeout(() => smoothScrollToElement(preview, 20), 100);
 			
 			currentStream = await navigator.mediaDevices.getUserMedia({ 
 				video: { 
@@ -1381,6 +1409,9 @@ async function toggleCamera() {
 			btn.textContent = '🛑 Stop Camera';
 			
 			status.textContent = '📷 Scanning... Point camera at QR code';
+			resetParityAggregator();
+			bestFrameQuality = 0;
+			lastFrameQualityMetrics = null;
 			
 			// Try to enable camera controls: autofocus/zoom/torch if supported
 			try { initCameraControls(currentStream, video); } catch (e) { /* ignore */ }
@@ -1403,72 +1434,192 @@ let scanPauseUntil = 0;
 let scanGeneration = 0; // increments per scheduled decode
 let currentDecodeGen = 0; // active decode token
 let bestFrameQuality = 0; // best quality observed recently
+
+function crc32String(str, start = 0, end = str.length) {
+	if (!str || end <= start) return 0;
+	let crc = 0xFFFFFFFF;
+	for (let i = start; i < end; i++) {
+		crc ^= str.charCodeAt(i) & 0xFF;
+		for (let j = 0; j < 8; j++) {
+			crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
+		}
+	}
+	return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
 let parityAggregator = {
     mode: null, // 'parity'|'standard'|'hybrid'
     base: null,
     red: null,
+    green: null,
     parity: null,
-    baseBlocks: new Map(), // RS block cache: blockIdx -> { data, locked }
+    baseBlocks: new Map(), // chunk cache: blockIdx -> { data, signature, confirmations, locked }
     redBlocks: new Map(),
     greenBlocks: new Map(),
+    chunkSize: 64,
+    expected: { base: 0, red: 0, green: 0 },
+    progress: null
 };
+
+let lastFrameQualityMetrics = null;
 
 function resetParityAggregator() {
     parityAggregator.mode = null;
     parityAggregator.base = null;
     parityAggregator.red = null;
+    parityAggregator.green = null;
     parityAggregator.parity = null;
     parityAggregator.baseBlocks.clear();
     parityAggregator.redBlocks.clear();
     parityAggregator.greenBlocks.clear();
+    parityAggregator.chunkSize = 64;
+    parityAggregator.expected = { base: 0, red: 0, green: 0 };
+    parityAggregator.progress = null;
 }
-
 // Per-block reconstruction for standard/hybrid 3-layer codes
-function attemptBlockReconstruction(layerName, blockMap) {
+function attemptBlockReconstruction(layerName, blockMap, chunkSize = 64) {
     if (blockMap.size === 0) return null;
     const blocks = Array.from(blockMap.values()).sort((a, b) => a.blockIdx - b.blockIdx);
     let combined = '';
-    for (const blk of blocks) if (blk.data && blk.locked) combined += blk.data;
+    for (const blk of blocks) {
+        if (!blk.locked || typeof blk.data !== 'string') {
+            break;
+        }
+        combined += blk.data;
+    }
     if (combined.length > 0) {
-        console.log(`   🧩 ${layerName}: reconstructed ${combined.length} bytes from ${blocks.length} locked blocks`);
+        const lockedCount = blocks.filter(b => b.locked && typeof b.data === 'string').length;
+        console.log(`   🧩 ${layerName}: reconstructed ${combined.length} chars from ${lockedCount} locked block(s)`);
         return combined;
     }
     return null;
 }
-
 function updateBlockAggregatorWithSpqr(spqrObj) {
     if (!spqrObj || typeof spqrObj !== 'object') return null;
-    let updated = false;
-    // Lock layers as blocks when they decode successfully
-    if (spqrObj.base && typeof spqrObj.base === 'string' && spqrObj.base.length > 0) {
-        if (!parityAggregator.base || spqrObj.base.length >= parityAggregator.base.length) {
-            parityAggregator.base = spqrObj.base;
-            parityAggregator.baseBlocks.set(0, { blockIdx: 0, data: spqrObj.base, locked: true });
-            updated = true;
+
+    const maybeMeta = spqrObj.meta || {};
+    const proposedChunkSize = maybeMeta.chunkSize || (spqrObj.parityInfo && spqrObj.parityInfo.chunkSize);
+    if (Number.isFinite(proposedChunkSize) && proposedChunkSize > 0 && proposedChunkSize !== parityAggregator.chunkSize) {
+        console.log(`   🔄 Updating chunk size from ${parityAggregator.chunkSize} to ${proposedChunkSize}`);
+        parityAggregator.chunkSize = proposedChunkSize;
+        parityAggregator.baseBlocks.clear();
+        parityAggregator.redBlocks.clear();
+        parityAggregator.greenBlocks.clear();
+        parityAggregator.expected = { base: 0, red: 0, green: 0 };
+    }
+
+    const chunkSize = parityAggregator.chunkSize;
+
+    const updateLayer = (layerKey, text, map) => {
+        if (!text || typeof text !== 'string' || text.length === 0) return false;
+        if (!parityAggregator[layerKey] || text.length >= parityAggregator[layerKey].length) {
+            parityAggregator[layerKey] = text;
         }
-    }
-    if (spqrObj.red && typeof spqrObj.red === 'string' && spqrObj.red.length > 0) {
-        if (!parityAggregator.red || spqrObj.red.length >= parityAggregator.red.length) {
-            parityAggregator.red = spqrObj.red;
-            parityAggregator.redBlocks.set(0, { blockIdx: 0, data: spqrObj.red, locked: true });
-            updated = true;
+        const totalChunks = Math.max(1, Math.ceil(text.length / chunkSize));
+        parityAggregator.expected[layerKey] = Math.max(parityAggregator.expected[layerKey] || 0, totalChunks);
+        let changed = false;
+        for (let idx = 0; idx < totalChunks; idx++) {
+            const start = idx * chunkSize;
+            const end = Math.min(text.length, start + chunkSize);
+            const chunkText = text.slice(start, end);
+            if (!chunkText) continue;
+            const signature = crc32String(chunkText);
+            const existing = map.get(idx);
+            if (!existing) {
+                map.set(idx, { blockIdx: idx, data: chunkText, signature, confirmations: 1, locked: false, lastSeen: Date.now() });
+                changed = true;
+                continue;
+            }
+            if (existing.signature === signature) {
+                existing.confirmations = Math.min((existing.confirmations || 0) + 1, 10);
+                existing.lastSeen = Date.now();
+                if (!existing.locked && existing.confirmations >= 2) {
+                    existing.locked = true;
+                    changed = true;
+                }
+            } else {
+                if (!existing.locked || chunkText.length > existing.data.length) {
+                    existing.data = chunkText;
+                    existing.signature = signature;
+                    existing.confirmations = 1;
+                    existing.locked = false;
+                    existing.lastSeen = Date.now();
+                    changed = true;
+                }
+            }
         }
-    }
-    if (spqrObj.green && typeof spqrObj.green === 'string' && spqrObj.green.length > 0) {
-        parityAggregator.greenBlocks.set(0, { blockIdx: 0, data: spqrObj.green, locked: true });
-        updated = true;
-    }
-    if (updated) {
-        const baseRec = attemptBlockReconstruction('Base', parityAggregator.baseBlocks);
-        const redRec = attemptBlockReconstruction('Red', parityAggregator.redBlocks);
-        const greenRec = attemptBlockReconstruction('Green', parityAggregator.greenBlocks);
+        return changed;
+    };
+
+    const baseChanged = updateLayer('base', spqrObj.base, parityAggregator.baseBlocks);
+    const redChanged = updateLayer('red', spqrObj.red, parityAggregator.redBlocks);
+    const greenChanged = updateLayer('green', spqrObj.green, parityAggregator.greenBlocks);
+
+    let aggregated = null;
+    if (baseChanged || redChanged || greenChanged) {
+        const baseRec = attemptBlockReconstruction('Base', parityAggregator.baseBlocks, chunkSize);
+        const redRec = attemptBlockReconstruction('Red', parityAggregator.redBlocks, chunkSize);
+        const greenRec = attemptBlockReconstruction('Green', parityAggregator.greenBlocks, chunkSize);
+
+        if (baseRec && (!parityAggregator.base || baseRec.length >= parityAggregator.base.length)) parityAggregator.base = baseRec;
+        if (redRec && (!parityAggregator.red || redRec.length >= parityAggregator.red.length)) parityAggregator.red = redRec;
+        if (greenRec && (!parityAggregator.green || greenRec.length >= parityAggregator.green.length)) parityAggregator.green = greenRec;
+
         if (baseRec || redRec || greenRec) {
             const combined = (baseRec || parityAggregator.base || '') + (redRec || parityAggregator.red || '') + (greenRec || '');
-            console.log(`   📦 Block aggregation: ${combined.length} bytes total`);
-            return { base: baseRec || parityAggregator.base, red: redRec || parityAggregator.red, green: greenRec, combined };
+            console.log(`   📦 Chunk aggregation: ${combined.length} chars total`);
+            aggregated = {
+                base: baseRec || parityAggregator.base || null,
+                red: redRec || parityAggregator.red || null,
+                green: greenRec || null,
+                combined
+            };
         }
     }
-    return null;
+
+    parityAggregator.progress = buildAggregatorProgressSnapshot();
+
+    return aggregated;
+}
+
+function buildAggregatorProgressSnapshot() {
+    const chunkSize = parityAggregator.chunkSize;
+    const maxDisplay = 24;
+    const summarise = (map, expectedCount) => {
+        const total = Math.max(expectedCount || 0, map.size);
+        if (total === 0) return null;
+        let bar = '';
+        let locked = 0;
+        let partial = 0;
+        for (let idx = 0; idx < total; idx++) {
+            const entry = map.get(idx);
+            let symbol = '⬛';
+            if (entry) {
+                if (entry.locked) {
+                    symbol = '🟩';
+                    locked++;
+                } else if (entry.confirmations && entry.confirmations > 0) {
+                    symbol = '🟨';
+                    partial++;
+                }
+            }
+            if (idx < maxDisplay) bar += symbol;
+        }
+        if (total > maxDisplay) bar += '…';
+        return {
+            total,
+            locked,
+            partial,
+            bar
+        };
+    };
+
+    return {
+        chunkSize,
+        base: summarise(parityAggregator.baseBlocks, parityAggregator.expected.base),
+        red: summarise(parityAggregator.redBlocks, parityAggregator.expected.red),
+        green: summarise(parityAggregator.greenBlocks, parityAggregator.expected.green)
+    };
 }
 
 function updateParityAggregatorWithSpqr(spqrObj) {
@@ -1481,6 +1632,7 @@ function updateParityAggregatorWithSpqr(spqrObj) {
     const isParityString = (s) => typeof s === 'string' && s.startsWith('SPQRv');
     if (maybeBase && (!parityAggregator.base || maybeBase.length > parityAggregator.base.length)) parityAggregator.base = maybeBase;
     if (maybeRed && (!parityAggregator.red || maybeRed.length > parityAggregator.red.length)) parityAggregator.red = maybeRed;
+    if (maybeGreen && (!parityAggregator.green || maybeGreen.length > parityAggregator.green.length)) parityAggregator.green = maybeGreen;
     if (isParityString(maybeGreen)) parityAggregator.parity = maybeGreen;
     if (isParityString(spqrObj.combined)) {
         // Some flows may incorrectly put parity in combined; ignore unless starts with SPQRv
@@ -1491,6 +1643,14 @@ function updateParityAggregatorWithSpqr(spqrObj) {
         try {
             const verification = verifyWithParity(parityAggregator.base || '', parityAggregator.red || '', parityAggregator.parity);
             if (verification && (verification.version === 'v2' || verification.recovered || verification.valid)) {
+                if (verification.chunkSize && verification.chunkSize !== parityAggregator.chunkSize) {
+                    console.log(`   🔄 Parity chunk size hint: ${verification.chunkSize}`);
+                    parityAggregator.chunkSize = verification.chunkSize;
+                    parityAggregator.baseBlocks.clear();
+                    parityAggregator.redBlocks.clear();
+                    parityAggregator.greenBlocks.clear();
+                    parityAggregator.expected = { base: 0, red: 0, green: 0 };
+                }
                 const baseOut = verification.base || parityAggregator.base || '';
                 const redOut = verification.red || parityAggregator.red || '';
                 const combined = baseOut + redOut;
@@ -1521,6 +1681,169 @@ function extractRoiFromGrid(imageData, grid, paddingModules = 1) {
 		rgba.set(data.subarray(srcOff, srcOff + w * 4), dstOff);
 	}
 	return { rgba, width: w, height: h, offsetX: x0, offsetY: y0, paddingPx: padPx };
+}
+
+function computePerspectiveGridCorners(grid, extraMarginModules = 1) {
+	if (!grid || !grid.finders || grid.finders.length < 3 || !Number.isFinite(grid.qrModules)) {
+		return null;
+	}
+	const [tlFinder, trFinder, blFinder] = grid.finders;
+	const modulesBetweenFinders = grid.qrModules - 7;
+	if (!Number.isFinite(modulesBetweenFinders) || modulesBetweenFinders <= 0) {
+		return null;
+	}
+	const unitTop = {
+		x: (trFinder.x - tlFinder.x) / modulesBetweenFinders,
+		y: (trFinder.y - tlFinder.y) / modulesBetweenFinders
+	};
+	const unitLeft = {
+		x: (blFinder.x - tlFinder.x) / modulesBetweenFinders,
+		y: (blFinder.y - tlFinder.y) / modulesBetweenFinders
+	};
+	const quietModules = 4;
+	const margin = quietModules + extraMarginModules;
+	const offsetTop = 3.5 + margin;
+	const offsetLeft = 3.5 + margin;
+	const cornerTL = {
+		x: tlFinder.x - unitTop.x * offsetTop - unitLeft.x * offsetLeft,
+		y: tlFinder.y - unitTop.y * offsetTop - unitLeft.y * offsetLeft
+	};
+	const totalModules = grid.qrModules + margin * 2;
+	const widthVec = {
+		x: unitTop.x * totalModules,
+		y: unitTop.y * totalModules
+	};
+	const heightVec = {
+		x: unitLeft.x * totalModules,
+		y: unitLeft.y * totalModules
+	};
+	const cornerTR = { x: cornerTL.x + widthVec.x, y: cornerTL.y + widthVec.y };
+	const cornerBL = { x: cornerTL.x + heightVec.x, y: cornerTL.y + heightVec.y };
+	const cornerBR = { x: cornerTL.x + widthVec.x + heightVec.x, y: cornerTL.y + widthVec.y + heightVec.y };
+	return {
+		tl: cornerTL,
+		tr: cornerTR,
+		br: cornerBR,
+		bl: cornerBL,
+		marginModules: margin,
+		totalModules
+	};
+}
+
+function sampleBilinearPixel(data, width, height, fx, fy) {
+	const x = clamp(fx, 0, width - 1);
+	const y = clamp(fy, 0, height - 1);
+	const x0 = Math.floor(x);
+	const y0 = Math.floor(y);
+	const x1 = Math.min(width - 1, x0 + 1);
+	const y1 = Math.min(height - 1, y0 + 1);
+	const dx = x - x0;
+	const dy = y - y0;
+	const idx00 = (y0 * width + x0) * 4;
+	const idx10 = (y0 * width + x1) * 4;
+	const idx01 = (y1 * width + x0) * 4;
+	const idx11 = (y1 * width + x1) * 4;
+	const out = [0, 0, 0, 255];
+	for (let c = 0; c < 3; c++) {
+		const v00 = data[idx00 + c];
+		const v10 = data[idx10 + c];
+		const v01 = data[idx01 + c];
+		const v11 = data[idx11 + c];
+		const top = v00 * (1 - dx) + v10 * dx;
+		const bottom = v01 * (1 - dx) + v11 * dx;
+		out[c] = top * (1 - dy) + bottom * dy;
+	}
+	return out;
+}
+
+function resampleGridToSquare(imageData, grid, targetModulePx, extraMarginModules = 1) {
+	const corners = computePerspectiveGridCorners(grid, extraMarginModules);
+	if (!corners) {
+		return null;
+	}
+	const totalModules = corners.totalModules;
+	const outSize = Math.max(1, Math.round(totalModules * targetModulePx));
+	const outWidth = outSize;
+	const outHeight = outSize;
+	const outData = new Uint8ClampedArray(outWidth * outHeight * 4);
+	const srcData = imageData.data;
+	const srcWidth = imageData.width;
+	const srcHeight = imageData.height;
+	for (let y = 0; y < outHeight; y++) {
+		const v = outHeight > 1 ? y / (outHeight - 1) : 0;
+		for (let x = 0; x < outWidth; x++) {
+			const u = outWidth > 1 ? x / (outWidth - 1) : 0;
+			const sx = corners.tl.x * (1 - u) * (1 - v) + corners.tr.x * u * (1 - v) + corners.br.x * u * v + corners.bl.x * (1 - u) * v;
+			const sy = corners.tl.y * (1 - u) * (1 - v) + corners.tr.y * u * (1 - v) + corners.br.y * u * v + corners.bl.y * (1 - u) * v;
+			const sampled = sampleBilinearPixel(srcData, srcWidth, srcHeight, sx, sy);
+			const di = (y * outWidth + x) * 4;
+			outData[di] = sampled[0];
+			outData[di+1] = sampled[1];
+			outData[di+2] = sampled[2];
+			outData[di+3] = 255;
+		}
+	}
+	return {
+		rgba: outData,
+		width: outWidth,
+		height: outHeight,
+		totalModules,
+		paddingModules: extraMarginModules,
+		source: 'perspective'
+	};
+}
+
+function applyBoxBlur(rgba, width, height, radius = 1) {
+	if (radius <= 0) return;
+	const tmp = new Uint8ClampedArray(rgba.length);
+	const kernel = [];
+	for (let ky = -radius; ky <= radius; ky++) {
+		for (let kx = -radius; kx <= radius; kx++) {
+			kernel.push([kx, ky]);
+		}
+	}
+	const kernelSize = kernel.length;
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			let r = 0, g = 0, b = 0;
+			for (const [kx, ky] of kernel) {
+				const sx = clamp(x + kx, 0, width - 1);
+				const sy = clamp(y + ky, 0, height - 1);
+				const si = (sy * width + sx) * 4;
+				r += rgba[si];
+				g += rgba[si + 1];
+				b += rgba[si + 2];
+			}
+			const di = (y * width + x) * 4;
+			tmp[di] = r / kernelSize;
+			tmp[di + 1] = g / kernelSize;
+			tmp[di + 2] = b / kernelSize;
+			tmp[di + 3] = 255;
+		}
+	}
+	rgba.set(tmp);
+}
+
+function maybeReduceBanding(rgba, width, height) {
+	let diffSum = 0;
+	let samples = 0;
+	for (let y = 1; y < height; y += 2) {
+		for (let x = 0; x < width; x += 2) {
+			const idx = (y * width + x) * 4;
+			const prevIdx = ((y - 1) * width + x) * 4;
+			const lum = 0.2126 * rgba[idx] + 0.7152 * rgba[idx + 1] + 0.0722 * rgba[idx + 2];
+			const prevLum = 0.2126 * rgba[prevIdx] + 0.7152 * rgba[prevIdx + 1] + 0.0722 * rgba[prevIdx + 2];
+			diffSum += Math.abs(lum - prevLum);
+			samples++;
+		}
+	}
+	if (!samples) return false;
+	const avgDiff = diffSum / samples;
+	if (avgDiff > 18) {
+		applyBoxBlur(rgba, width, height, 1);
+		return true;
+	}
+	return false;
 }
 
 function resampleNearest(src, sw, sh, dw, dh) {
@@ -1599,39 +1922,60 @@ function enhanceImageContrast(rgba, width, height) {
 	console.log('📈 Histogram equalization + gamma boost applied');
 	return enhanced;
 }
-
 async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
-	// Crop ROI around QR, then scale to target module size for robust sampling
-	const roi = extractRoiFromGrid(imageData, grid, 1);
-	console.log(`   📦 ROI extracted: ${roi.width}×${roi.height} from offset (${roi.offsetX},${roi.offsetY}), padding=${roi.paddingPx}px`);
-	const modulesWithMargin = grid.qrModules + 8 + 2; // +2 for padding on each side already included
-	const dw = modulesWithMargin * targetModulePx;
-	const dh = modulesWithMargin * targetModulePx;
-	console.log(`   🔄 Resampling ROI from ${roi.width}×${roi.height} to ${dw}×${dh}`);
-	let scaled = resampleNearest(roi.rgba, roi.width, roi.height, dw, dh);
+	const extraPaddingModules = 1;
+	let resampled = null;
+	if (grid && grid.finders && grid.finders.length >= 3) {
+		try {
+			resampled = resampleGridToSquare(imageData, grid, targetModulePx, extraPaddingModules);
+			if (resampled) {
+				console.log(`   📦 ROI extracted via perspective warp: ${resampled.width}×${resampled.height}`);
+			}
+		} catch (err) {
+			console.log(`   ⚠️ Perspective warp failed: ${err.message}`);
+		}
+	}
+	if (!resampled) {
+		const roi = extractRoiFromGrid(imageData, grid, extraPaddingModules);
+		const totalModules = grid.qrModules + 8 + extraPaddingModules * 2;
+		const targetSize = totalModules * targetModulePx;
+		console.log(`   📦 ROI extracted (axis-aligned fallback): ${roi.width}×${roi.height} from offset (${roi.offsetX},${roi.offsetY}), padding=${roi.paddingPx}px`);
+		console.log(`   🔄 Resampling ROI from ${roi.width}×${roi.height} to ${targetSize}×${targetSize}`);
+		const scaled = resampleNearest(roi.rgba, roi.width, roi.height, targetSize, targetSize);
+		resampled = {
+			rgba: scaled,
+			width: targetSize,
+			height: targetSize,
+			totalModules,
+			paddingModules: extraPaddingModules,
+			source: 'axis'
+		};
+	}
+	if (maybeReduceBanding(resampled.rgba, resampled.width, resampled.height)) {
+		console.log('   🔧 Applied mild blur to suppress banding artefacts');
+	}
 	
 	// AGGRESSIVE PREPROCESSING: Only enhance if image looks degraded!
-	// Check if the image has good contrast already (clean generated codes don't need enhancement)
-	let minVal = 255, maxVal = 0;
-	for (let i = 0; i < scaled.length; i += 4) {
-		const val = Math.max(scaled[i], scaled[i+1], scaled[i+2]);
+	let minVal = 255;
+	let maxVal = 0;
+	for (let i = 0; i < resampled.rgba.length; i += 4) {
+		const val = Math.max(resampled.rgba[i], resampled.rgba[i+1], resampled.rgba[i+2]);
 		if (val < minVal) minVal = val;
 		if (val > maxVal) maxVal = val;
 	}
 	const contrast = maxVal - minVal;
+	let working = resampled.rgba;
 	if (contrast < 200) {
-		// Low contrast - probably a degraded/washed out image, apply aggressive enhancement
-		console.log(`📈 Low contrast (${contrast}) - applying histogram equalization...`);
-		scaled = enhanceImageContrast(scaled, dw, dh);
+		console.log(`📈 Low contrast (${contrast}) - applying histogram equalisation...`);
+		working = enhanceImageContrast(working, resampled.width, resampled.height);
 	} else {
 		console.log(`✅ Good contrast (${contrast}) - skipping enhancement`);
 	}
-	
-	const id = makeImageDataFromRgba(scaled, dw, dh);
+	const id = makeImageDataFromRgba(working, resampled.width, resampled.height);
 	
 	// Calibrate colors from finder patterns in the ROI AFTER enhancement
-	const originInROI = targetModulePx; // 1 module of padding
-	const finderSamples = sampleFinderRefsWithOrigin(id.data, dw, dh, targetModulePx, grid.qrModules, 1, originInROI, originInROI);
+	const finderMarginModules = 4 + extraPaddingModules;
+	const finderSamples = sampleFinderRefsWithOrigin(id.data, id.width, id.height, targetModulePx, grid.qrModules, finderMarginModules, 0, 0);
 	if (finderSamples) {
 		window.cameraCalibration = finderSamples;
 		console.log('Calibrated colors from finder patterns:', finderSamples);
@@ -1653,13 +1997,11 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	if (window.zxingCodeReader) {
 		try {
 			console.log('🔷 Trying ZXing on enhanced ROI...');
-			// Create a temporary canvas with the enhanced image
 			const tempCanvas = document.createElement('canvas');
-			tempCanvas.width = dw;
-			tempCanvas.height = dh;
+			tempCanvas.width = id.width;
+			tempCanvas.height = id.height;
 			const tempCtx = tempCanvas.getContext('2d');
 			tempCtx.putImageData(id, 0, 0);
-			
 			const zxingResult = await window.zxingCodeReader.decodeFromImageElement(tempCanvas);
 			if (zxingResult && zxingResult.getText()) {
 				console.log(`✅ ZXing decoded: "${zxingResult.getText()}"`);
@@ -1671,8 +2013,9 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 		}
 	}
 	
-	// Provide a precise grid hint for ROI (origin at 1*targetModulePx padding)
-	window.currentGridHint = { modules: grid.qrModules, modulePx: targetModulePx, originX: targetModulePx, originY: targetModulePx };
+	const originModuleOffset = finderMarginModules;
+	const originPixelOffset = originModuleOffset * targetModulePx;
+	window.currentGridHint = { modules: grid.qrModules, modulePx: targetModulePx, originX: originPixelOffset, originY: originPixelOffset };
 	// Try standard jsQR first on ROI
 	const std = jsQR(id.data, id.width, id.height, { inversionAttempts: "attemptBoth" });
 	if (std && std.data) {
@@ -1690,7 +2033,6 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	}
 	return null;
 }
-
 async function scanFromVideo() {
 	const video = document.getElementById('video');
 	const canvas = document.getElementById('canvas');
@@ -1714,6 +2056,21 @@ async function scanFromVideo() {
 		
 		// Clear overlay
 		overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+		// Draw focus reticle to assist alignment
+		overlayCtx.save();
+		overlayCtx.strokeStyle = 'rgba(255,255,255,0.35)';
+		overlayCtx.lineWidth = 2;
+		const reticleSize = Math.min(overlayCanvas.width, overlayCanvas.height) * 0.18;
+		const centerX = overlayCanvas.width / 2;
+		const centerY = overlayCanvas.height / 2;
+		overlayCtx.strokeRect(centerX - reticleSize / 2, centerY - reticleSize / 2, reticleSize, reticleSize);
+		overlayCtx.beginPath();
+		overlayCtx.moveTo(centerX - reticleSize * 0.6, centerY);
+		overlayCtx.lineTo(centerX + reticleSize * 0.6, centerY);
+		overlayCtx.moveTo(centerX, centerY - reticleSize * 0.6);
+		overlayCtx.lineTo(centerX, centerY + reticleSize * 0.6);
+		overlayCtx.stroke();
+		overlayCtx.restore();
 		
 		const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 		
@@ -1767,7 +2124,9 @@ async function scanFromVideo() {
 			}
 			
             // Compute quality and schedule heavy decode attempts; cancel older ones if a better frame arrives
-            const quality = computeFrameQuality(imageData, grid);
+            const qualityMetrics = computeFrameQuality(imageData, grid);
+            const quality = qualityMetrics.score;
+            lastFrameQualityMetrics = qualityMetrics;
             console.log(`   📊 Frame quality score: ${Math.round(quality)} (best=${Math.round(bestFrameQuality)})`);
             if (quality >= bestFrameQuality * 0.98) {
                 scheduleDecodeFromGrid(imageData, grid, quality);
@@ -1830,6 +2189,20 @@ function initCameraControls(stream, video) {
         track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(()=>{});
     }
 
+    // If macro focus is available, bias towards close focus
+    const focusSupportsMacro = caps.focusMode && caps.focusMode.includes('macro');
+    if (focusSupportsMacro) {
+        track.applyConstraints({ advanced: [{ focusMode: 'macro' }] }).catch(()=>{});
+    } else if (caps.focusMode && caps.focusMode.includes('manual') && caps.focusDistance) {
+        const near = typeof caps.focusDistance.max === 'number' ? caps.focusDistance.max : null;
+        if (near !== null) {
+            track.applyConstraints({ advanced: [{ focusMode: 'manual', focusDistance: near }] }).catch(()=>{});
+            setTimeout(() => {
+                track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(()=>{});
+            }, 1500);
+        }
+    }
+
     // Expose tap-to-focus on overlay
     const overlayCanvas = document.getElementById('overlay-canvas');
     if (overlayCanvas) {
@@ -1869,41 +2242,50 @@ function initCameraControls(stream, video) {
 // Compute a simple frame quality score to prioritise better frames for heavy decoding
 function computeFrameQuality(imageData, grid) {
     const { data, width, height } = imageData;
-    // Contrast proxy: max channel minus min channel across a subsample
-    let minV = 255, maxV = 0; let step = Math.max(1, Math.floor(Math.min(width,height)/128));
+    const step = Math.max(1, Math.floor(Math.min(width, height) / 128));
+
+    let minV = 255, maxV = 0;
     for (let y = 0; y < height; y += step) {
         for (let x = 0; x < width; x += step) {
-            const i = (y*width + x) * 4;
-            const v = Math.max(data[i], data[i+1], data[i+2]);
-            if (v < minV) minV = v; if (v > maxV) maxV = v;
+            const i = (y * width + x) * 4;
+            const v = Math.max(data[i], data[i + 1], data[i + 2]);
+            if (v < minV) minV = v;
+            if (v > maxV) maxV = v;
         }
     }
-    const contrast = maxV - minV; // 0..255
-    // Sharpness proxy: edge magnitude over small sample (Sobel-ish)
-    let sharp = 0; let samples = 0;
-    for (let y = 1; y < height-1; y += step*2) {
-        for (let x = 1; x < width-1; x += step*2) {
-            const i = (y*width + x) * 4;
-            const gx = (data[i+4]-data[i-4]) + (data[i+4*width]-data[i-4*width]);
-            const gy = (data[i+4*width]-data[i-4*width]) + (data[i+4]-data[i-4]);
-            sharp += Math.abs(gx) + Math.abs(gy); samples++;
+    const contrast = maxV - minV;
+
+    let sharp = 0;
+    let samples = 0;
+    for (let y = 1; y < height - 1; y += step * 2) {
+        for (let x = 1; x < width - 1; x += step * 2) {
+            const i = (y * width + x) * 4;
+            const gx = (data[i + 4] - data[i - 4]) + (data[i + 4 * width] - data[i - 4 * width]);
+            const gy = (data[i + 4 * width] - data[i - 4 * width]) + (data[i + 4] - data[i - 4]);
+            sharp += Math.abs(gx) + Math.abs(gy);
+            samples++;
         }
     }
     const sharpness = samples ? sharp / samples : 0;
-    // Grid confidence: presence of grid increases score
-    const gridBonus = grid && grid.qrModules ? Math.min(1, grid.qrModules/57) * 50 : 0; // + up to 50
-    // Colorfulness: ratio of colored pixels over a sample
-    let colored = 0, total = 0;
-    for (let y = 0; y < height; y += step*2) {
-        for (let x = 0; x < width; x += step*2) {
-            const i = (y*width + x) * 4;
-            const r = data[i], g = data[i+1], b = data[i+2];
-            const isBlack = r<50&&g<50&&b<50; const isWhite = r>200&&g>200&&b>200;
-            if (!isBlack && !isWhite) colored++; total++;
+
+    const gridBonus = grid && grid.qrModules ? Math.min(1, grid.qrModules / 57) * 50 : 0;
+
+    let colored = 0;
+    let total = 0;
+    for (let y = 0; y < height; y += step * 2) {
+        for (let x = 0; x < width; x += step * 2) {
+            const i = (y * width + x) * 4;
+            const r = data[i], g = data[i + 1], b = data[i + 2];
+            const isBlack = r < 50 && g < 50 && b < 50;
+            const isWhite = r > 200 && g > 200 && b > 200;
+            if (!isBlack && !isWhite) colored++;
+            total++;
         }
     }
-    const colorRatio = total ? (colored/total) : 0;
-    return contrast + sharpness*0.01 + gridBonus + colorRatio*200;
+    const colorRatio = total ? (colored / total) : 0;
+
+    const score = contrast + sharpness * 0.01 + gridBonus + colorRatio * 200;
+    return { score, contrast, sharpness, gridBonus, colorRatio };
 }
 
 // Schedule a heavy decode for this frame/grid, cancelling previous if a better one appears
@@ -2014,7 +2396,6 @@ function sampleFinderRefsWithOrigin(rgba, width, height, modulePx, modulesTotal,
 	console.log('Finder sampling:', { tl: tlColor, tr: trColor, bl: blColor, identified: { red, green, black } });
 	return { type: 'BWRG', samples: { red, green, black } };
 }
-
 async function handleFileUpload(e) {
 	const file = e.target.files[0];
 	if (!file) return;
@@ -2079,7 +2460,6 @@ async function handleFileUpload(e) {
 		alert('Error processing image: ' + error.message);
 	}
 }
-
 function detectSPQR(imageData) {
     const { data, width, height } = imageData;
     
@@ -2206,14 +2586,23 @@ function detectSPQR(imageData) {
 					const threshold = 30;
 					const tlDistinct = tlDists.filter(d=>d>threshold).length;
 					const trDistinct = trDists.filter(d=>d>threshold).length;
-					console.log(`   TL distinctiveness: ${tlDistinct}/6 pairs > ${threshold}px distance (${tlDists.map(d=>Math.round(d)).join(', ')})`);
-					console.log(`   TR distinctiveness: ${trDistinct}/6 pairs > ${threshold}px distance (${trDists.map(d=>Math.round(d)).join(', ')})`);
-					if (tlDistinct >= 2 && trDistinct >= 2) {
-						console.log('CMYRGB (8-color, 3-layer) SPQR detected via finder-key palette');
-						if (savedGridHint) window.currentGridHint = savedGridHint;
-						return decodeCMYRGBLayers(imageData);
+					const totalDistinct = tlDistinct + trDistinct;
+					console.log(`  CMYRGB palette probe: TL ${tlDistinct}/6 > ${threshold}, TR ${trDistinct}/6 > ${threshold}`);
+					if ((tlDistinct >= 2 && trDistinct >= 2) || trDistinct >= 3 || totalDistinct >= 5) {
+						console.log('CMYRGB (8-color, 3-layer) SPQR detected via palette probe');
+						window.currentGridHint = savedGridHint || { modules, modulePx, originX, originY };
+						const paletteForDecode = cmy;
+						if (paletteForDecode) {
+							paletteForDecode._fromCamera = true;
+							window.cameraCalibrationCMY = paletteForDecode;
+						}
+						const cmyResult = decodeCMYRGBLayers(imageData);
+						if (cmyResult && (cmyResult.base || cmyResult.red || cmyResult.green)) {
+							return cmyResult;
+						}
+						console.log('   ⚠️  CMYRGB decode failed after palette probe, continuing with fallback');
 					} else {
-						console.log(`   ⚠️  Not enough distinctiveness for CMYRGB (need 2+2, got ${tlDistinct}+${trDistinct}), trying BWRG...`);
+						console.log(`   ⚠️  Not enough distinctiveness for CMYRGB (need 2+2 or 3+0 or 5+0, got ${tlDistinct}+${trDistinct}), trying BWRG...`);
 					}
 				}
 			} catch (e) {
@@ -2305,7 +2694,6 @@ function detectSPQR(imageData) {
 		throw error; // Re-throw to see it in the console
 	}
 }
-
 // SPQR decoder with known grid structure (fallback when jsQR fails)
 function decodeSPQRWithKnownGrid(data, width, height) {
     console.log('Attempting SPQR decode with known grid structure...');
@@ -2569,7 +2957,6 @@ function decodeLayerDirect(binaryLayer, layerName) {
     console.log(`${layerName} layer result:`, result ? `"${result.data}"` : 'null');
     return result ? result.data : null;
 }
-
 // Enforce standard finder patterns (7x7) at TL, TR, BL in the binary module grid
 function enforceFindersOnBinary(binary) {
     const modules = binary.length;
@@ -2783,7 +3170,6 @@ function decodeSPQRDirect(imageData) {
         };
     }
 }
-
 // Integrated SPQR decoder using jsQR algorithms adapted for multi-layer
 function decodeSPQRLayersSimple(imageData) {
     const { data, width, height } = imageData;
@@ -2881,7 +3267,6 @@ function createBinaryMatrix(data, width, height, isDarkPredicate) {
     }
     return matrix;
 }
-
 // Locate QR structure using jsQR directly instead of manual finder detection
 function locateQR(binary) {
     const height = binary.length;
@@ -3067,7 +3452,6 @@ function verifyFinderPattern(binary, x, y, moduleSize) {
     
     return false;
 }
-
 // Cluster finder candidates into 3 distinct positions
 function clusterFinders(candidates) {
     // Simple clustering: group candidates within 5 module distance
@@ -3307,7 +3691,6 @@ function decodeQRData(extracted) {
         return null;
     }
 }
-
 // The internal decoder functions have been removed.
 // We now use jsQR directly for SPQR layer decoding.
 
@@ -3560,11 +3943,9 @@ function decodeSPQRLayers(imageData) {
 				if (!inFinder(6, y)) mods[y][6] = (y % 2) === 0;
 			}
 		};
-		
 		// Keep copies before enforcement for comparison
 		const baseModsRaw = baseMods.map(row => [...row]);
 		const redModsRaw = redMods.map(row => [...row]);
-		
 		enforceFinders(baseMods);
 		enforceFinders(redMods);
 		
@@ -3639,7 +4020,6 @@ function decodeSPQRLayers(imageData) {
 		};
 	}
 }
-
 // CMYRGB (8-color) SPQR decoder for 3-layer codes
 function decodeCMYRGBLayers(imageData) {
 	const { data, width, height } = imageData;
@@ -3657,16 +4037,16 @@ function decodeCMYRGBLayers(imageData) {
 			return { r, g, b };
 		};
 		
-		const paletteRgb = {
-			'W': hexToRgb(palette[0]), // White
-			'R': hexToRgb(palette[1]), // Red
-			'G': hexToRgb(palette[2]), // Green
-			'Y': hexToRgb(palette[3]), // Yellow
-			'K': hexToRgb(palette[4]), // Black
-			'M': hexToRgb(palette[5]), // Magenta
-			'C': hexToRgb(palette[6]), // Cyan
-			'B': hexToRgb(palette[7])  // Blue
-		};
+	const paletteRgb = {
+		'W': hexToRgb(palette[0]), // White
+		'R': hexToRgb(palette[1]), // Red
+		'G': hexToRgb(palette[2]), // Green
+		'Y': hexToRgb(palette[3]), // Yellow
+		'K': hexToRgb(palette[4]), // Black
+		'M': hexToRgb(palette[5]), // Magenta
+		'C': hexToRgb(palette[6]), // Cyan
+		'B': hexToRgb(palette[7])  // Blue
+	};
 		
 		// Prefer camera-derived calibration ONLY if from actual camera (not file upload)
 		// File uploads should use default/custom palette as they're already clean
@@ -3680,70 +4060,75 @@ function decodeCMYRGBLayers(imageData) {
 		}
 		
 		// Step 1: Classify pixels using improved color matching for lighting tolerance
-		const classifyPixel = (r, g, b) => {
-			// CMYRGB color mapping (used in generator):
-			// White (W): C=0, M=0, Y=0 → RGB(255,255,255)
-			// Cyan  (C): C=1, M=0, Y=0 → RGB(0,255,255)
-			// Magenta(M):C=0, M=1, Y=0 → RGB(255,0,255)
-			// Yellow(Y): C=0, M=0, Y=1 → RGB(255,255,0)
-			// Red   (R): C=0, M=1, Y=1 → RGB(255,0,0)
-			// Green (G): C=1, M=0, Y=1 → RGB(0,255,0)
-			// Blue  (B): C=1, M=1, Y=0 → RGB(0,0,255)
-			// Black (K): C=1, M=1, Y=1 → RGB(0,0,0)
-			
-		// For calibrated images (from camera), use direct distance to palette
-		// For generated codes, use heuristic classification
-		const useCalibrated = window.cameraCalibrationCMY && window.cameraCalibrationCMY._fromCamera;
-			
-			if (useCalibrated) {
-				// Use direct Euclidean distance to calibrated palette
-				let minDist = Infinity;
-				let bestColor = 'W';
-				
-				for (const [colorName, rgb] of Object.entries(paletteRgb)) {
-					const dist = Math.hypot(r - rgb.r, g - rgb.g, b - rgb.b);
-					if (dist < minDist) {
-						minDist = dist;
-						bestColor = colorName;
-					}
-				}
-				
-				return bestColor;
-			} else {
-				// Heuristic classification for generated codes
-				// Check which primary colors are present (threshold at 200 for "on", 100 for "off")
-				const hasR = r > 200;
-				const hasG = g > 200;
-				const hasB = b > 200;
-				const noR = r < 100;
-				const noG = g < 100;
-				const noB = b < 100;
-				
-				// Perfect matches first
-				if (hasR && hasG && hasB) return 'W'; // White: all on
-				if (noR && noG && noB) return 'K';     // Black: all off
-				if (noR && hasG && hasB) return 'C';   // Cyan: G+B, no R
-				if (hasR && noG && hasB) return 'M';   // Magenta: R+B, no G
-				if (hasR && hasG && noB) return 'Y';   // Yellow: R+G, no B
-				if (hasR && noG && noB) return 'R';    // Red: R only
-				if (noR && hasG && noB) return 'G';    // Green: G only
-				if (noR && noG && hasB) return 'B';    // Blue: B only
-				
-				// Fallback to distance-based for ambiguous cases
-				let minDist = Infinity;
-				let bestColor = 'W';
-				
-				for (const [colorName, rgb] of Object.entries(paletteRgb)) {
-					const dist = Math.hypot(r - rgb.r, g - rgb.g, b - rgb.b);
-					if (dist < minDist) {
-						minDist = dist;
-						bestColor = colorName;
-					}
-				}
-				
-				return bestColor;
-			}
+	const useCalibrated = window.cameraCalibrationCMY && window.cameraCalibrationCMY._fromCamera;
+	const cameraClassifier = useCalibrated ? createCameraCMYClassifier(paletteRgb) : null;
+	if (cameraClassifier) {
+		const separationValue = Number.isFinite(cameraClassifier.separation) ? Number(cameraClassifier.separation.toFixed(3)) : cameraClassifier.separation;
+		console.log('   📐 CMY camera classifier ready:', {
+			separation: separationValue,
+			C: { threshold: Number(cameraClassifier.configs.c.threshold.toFixed(3)), sep: Number(cameraClassifier.configs.c.separation.toFixed(3)), polarity: cameraClassifier.configs.c.polarity },
+			M: { threshold: Number(cameraClassifier.configs.m.threshold.toFixed(3)), sep: Number(cameraClassifier.configs.m.separation.toFixed(3)), polarity: cameraClassifier.configs.m.polarity },
+			Y: { threshold: Number(cameraClassifier.configs.y.threshold.toFixed(3)), sep: Number(cameraClassifier.configs.y.separation.toFixed(3)), polarity: cameraClassifier.configs.y.polarity }
+		});
+		if (separationValue !== null && separationValue !== undefined && separationValue < 0.08) {
+			console.log('   ⚠️  CMY colour separation is weak; blending distance and bit thresholds.');
+		}
+		window.lastCameraCMYClassifier = {
+			stats: cameraClassifier.stats,
+			configs: cameraClassifier.configs,
+			separation: cameraClassifier.separation
 		};
+	} else {
+		window.lastCameraCMYClassifier = null;
+	}
+	const classifyPixel = (r, g, b) => {
+		if (cameraClassifier) {
+			return cameraClassifier.classify(r, g, b);
+		}
+
+		if (useCalibrated) {
+			let minDist = Infinity;
+			let bestColor = 'W';
+			for (const [colorName, rgb] of Object.entries(paletteRgb)) {
+				if (!rgb || typeof rgb.r !== 'number') continue;
+				const dist = Math.hypot(r - rgb.r, g - rgb.g, b - rgb.b);
+				if (dist < minDist) {
+					minDist = dist;
+					bestColor = colorName;
+				}
+			}
+			return bestColor;
+		}
+
+		// Heuristic classification for generated codes
+		const hasR = r > 200;
+		const hasG = g > 200;
+		const hasB = b > 200;
+		const noR = r < 100;
+		const noG = g < 100;
+		const noB = b < 100;
+		
+		if (hasR && hasG && hasB) return 'W'; // White: all on
+		if (noR && noG && noB) return 'K';     // Black: all off
+		if (noR && hasG && hasB) return 'C';   // Cyan: G+B, no R
+		if (hasR && noG && hasB) return 'M';   // Magenta: R+B, no G
+		if (hasR && hasG && noB) return 'Y';   // Yellow: R+G, no B
+		if (hasR && noG && noB) return 'R';    // Red: R only
+		if (noR && hasG && noB) return 'G';    // Green: G only
+		if (noR && noG && hasB) return 'B';    // Blue: B only
+
+		let minDist = Infinity;
+		let bestColor = 'W';
+		for (const [colorName, rgb] of Object.entries(paletteRgb)) {
+			if (!rgb || typeof rgb.r !== 'number') continue;
+			const dist = Math.hypot(r - rgb.r, g - rgb.g, b - rgb.b);
+			if (dist < minDist) {
+				minDist = dist;
+				bestColor = colorName;
+			}
+		}
+		return bestColor;
+	};
 	
 	// Step 2: Detect grid structure (prefer camera/ROI hint)
 	let margin = 4;
@@ -3819,6 +4204,8 @@ function decodeCMYRGBLayers(imageData) {
 		originY = margin * modulePx;
 		console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module`);
 	}
+
+	const fallbackVersion = Math.max(1, Math.round((modules - 21) / 4) + 1);
 		
 		// Step 3: Sample modules and decompose into 3 layers
 		// Note: Despite names, these map to baseQr, greenQr, redQr in the generator
@@ -3991,6 +4378,20 @@ function decodeCMYRGBLayers(imageData) {
 		
 		// Step 5: Decode layers
 	const decodeLayer = (mods, layerName) => {
+		const buildResult = (text, details) => {
+			if (!text) return null;
+			const inferredVersion = Number.isFinite(details.version) ? details.version : fallbackVersion;
+			return {
+				text,
+				source: details.source,
+				scale: details.scale,
+				version: inferredVersion,
+				eccLevel: details.eccLevel || null,
+				binary: details.binary || null,
+				maskPattern: details.maskPattern ?? null,
+				chunks: details.chunks || null
+			};
+		};
 		// Try multiple scaling factors (jsQR is finicky about scale)
 		const scales = [8, 12, 16, 4, 6, 10];
 		
@@ -4003,7 +4404,6 @@ function decodeCMYRGBLayers(imageData) {
 					const my = Math.floor(y / scale);
 					const mx = Math.floor(x / scale);
 					const isDark = mods[my][mx];
-					
 					const idx = (y * scaledSize + x) * 4;
 					const val = isDark ? 0 : 255;
 					rgba[idx] = rgba[idx + 1] = rgba[idx + 2] = val;
@@ -4014,27 +4414,46 @@ function decodeCMYRGBLayers(imageData) {
 			// Try jsQR first (fast)
 			const jsqrResult = jsQR(rgba, scaledSize, scaledSize, { inversionAttempts: "attemptBoth" });
 			if (jsqrResult && jsqrResult.data) {
+				const binaryData = jsqrResult.binaryData ? new Uint8Array(jsqrResult.binaryData) : null;
 				console.log(`   ✅ ${layerName} (jsQR @ ${scale}px): "${jsqrResult.data}"`);
-				return jsqrResult.data;
+				return buildResult(jsqrResult.data, {
+					source: 'jsQR',
+					scale,
+					version: jsqrResult.version || jsqrResult.versionNumber,
+					eccLevel: jsqrResult.eccLevel || jsqrResult.errorCorrectionLevel,
+					binary: binaryData,
+					maskPattern: jsqrResult.maskPattern,
+					chunks: jsqrResult.chunks
+				});
 			}
 			
 			// Try ZXing if available (more robust)
-			if (window.zxingCodeReader && scale === 8) { // Only try ZXing at optimal scale
+			if (window.zxingCodeReader && scale === 8) {
 				try {
 					const imageData = new ImageData(new Uint8ClampedArray(rgba), scaledSize, scaledSize);
 					const luminances = new Uint8ClampedArray(scaledSize * scaledSize);
 					for (let i = 0; i < scaledSize * scaledSize; i++) {
-						luminances[i] = rgba[i * 4]; // Use R channel (all channels are same for B&W)
+						luminances[i] = rgba[i * 4];
 					}
 					const binaryBitmap = new ZXing.BinaryBitmap(
 						new ZXing.HybridBinarizer(
 							new ZXing.RGBLuminanceSource(luminances, scaledSize, scaledSize)
 						)
 					);
-					const zxingResult = new ZXing.QRCodeReader().decode(binaryBitmap);
-					if (zxingResult && zxingResult.getText()) {
-						console.log(`   ✅ ${layerName} (ZXing @ ${scale}px): "${zxingResult.getText()}"`);
-						return zxingResult.getText();
+					const reader = new ZXing.QRCodeReader();
+					const zxingResult = reader.decode(binaryBitmap);
+					if (zxingResult && typeof zxingResult.getText === 'function') {
+						const text = zxingResult.getText();
+						const raw = typeof zxingResult.getRawBytes === 'function' ? zxingResult.getRawBytes() : null;
+						const binary = raw ? new Uint8Array(raw) : null;
+						console.log(`   ✅ ${layerName} (ZXing @ ${scale}px): "${text}"`);
+						return buildResult(text, {
+							source: 'ZXing',
+							scale,
+							version: null,
+							eccLevel: null,
+							binary
+						});
 					}
 				} catch (e) {
 					// ZXing failed, continue to next scale
@@ -4046,18 +4465,27 @@ function decodeCMYRGBLayers(imageData) {
 		return null;
 	};
 		
-	let baseText = decodeLayer(baseMods, 'Base layer');
-	let greenText = decodeLayer(greenMods, 'Green layer');
-	let redText = decodeLayer(redMods, 'Red layer');
-	
+	let baseLayer = decodeLayer(baseMods, 'Base layer');
+	let greenLayer = decodeLayer(greenMods, 'Green layer');
+	let redLayer = decodeLayer(redMods, 'Red layer');
+	let baseText = baseLayer ? baseLayer.text : null;
+	let greenText = greenLayer ? greenLayer.text : null;
+	let redText = redLayer ? redLayer.text : null;
 // AGGRESSIVE RECOVERY: If all layers failed, try with inverted bits
 if (!baseText && !greenText && !redText) {
 	console.log('⚡ ALL layers failed jsQR - trying AGGRESSIVE bit inversion recovery...');
 	const invertMods = (mods) => mods.map(row => row.map(bit => !bit));
 	
-	baseText = decodeLayer(invertMods(baseMods), 'Base layer (inverted)');
-	if (!baseText) greenText = decodeLayer(invertMods(greenMods), 'Green layer (inverted)');
-	if (!baseText && !greenText) redText = decodeLayer(invertMods(redMods), 'Red layer (inverted)');
+	const invBase = decodeLayer(invertMods(baseMods), 'Base layer (inverted)');
+	if (invBase) { baseLayer = invBase; baseText = invBase.text; }
+	if (!baseText) {
+		const invGreen = decodeLayer(invertMods(greenMods), 'Green layer (inverted)');
+		if (invGreen) { greenLayer = invGreen; greenText = invGreen.text; }
+	}
+	if (!baseText && !greenText) {
+		const invRed = decodeLayer(invertMods(redMods), 'Red layer (inverted)');
+		if (invRed) { redLayer = invRed; redText = invRed.text; }
+	}
 	
 	// NUCLEAR OPTION: jsQR bypass for short messages
 	if (!baseText && !greenText && !redText) {
@@ -4177,7 +4605,7 @@ if (!baseText && !greenText && !redText) {
 		const redDecoded = decodeBits(redBits, 'Red');
 		
 		// If green is parity data, try recovery
-		if (greenDecoded && greenDecoded.startsWith('SPQRv1|')) {
+		if (greenDecoded && greenDecoded.startsWith('SPQRv')) {
 			console.log(`🔐 PARITY MODE: Green layer is parity, using for recovery...`);
 			
 			// If base failed but red succeeded, recover base
@@ -4190,6 +4618,9 @@ if (!baseText && !greenText && !redText) {
 				const recoveredText = decodeBits(recoveredBits, 'Base (recovered)');
 				if (recoveredText) {
 					baseText = recoveredText;
+					if (!baseLayer) baseLayer = { text: recoveredText, source: 'parity-recover' };
+					else { baseLayer.text = recoveredText; baseLayer.source = baseLayer.source || 'parity-recover'; }
+					baseLayer.recovered = true;
 					console.log(`   ✅ BASE LAYER RECOVERED: "${baseText}"`);
 				}
 			}
@@ -4204,31 +4635,53 @@ if (!baseText && !greenText && !redText) {
 				const recoveredText = decodeBits(recoveredBits, 'Red (recovered)');
 				if (recoveredText) {
 					redText = recoveredText;
+					if (!redLayer) redLayer = { text: recoveredText, source: 'parity-recover' };
+					else { redLayer.text = recoveredText; redLayer.source = redLayer.source || 'parity-recover'; }
+					redLayer.recovered = true;
 					console.log(`   ✅ RED LAYER RECOVERED: "${redText}"`);
 				}
 			}
 		} else {
 			// All three layers are data, use what we decoded
-			if (baseDecoded) baseText = baseDecoded;
-			if (greenDecoded) greenText = greenDecoded;
-			if (redDecoded) redText = redDecoded;
+			if (baseDecoded) {
+				baseText = baseDecoded;
+				if (!baseLayer) baseLayer = { text: baseDecoded, source: 'raw-decode' };
+				else baseLayer.text = baseDecoded;
+			}
+			if (greenDecoded) {
+				greenText = greenDecoded;
+				if (!greenLayer) greenLayer = { text: greenDecoded, source: 'raw-decode' };
+				else greenLayer.text = greenDecoded;
+			}
+			if (redDecoded) {
+				redText = redDecoded;
+				if (!redLayer) redLayer = { text: redDecoded, source: 'raw-decode' };
+				else redLayer.text = redDecoded;
+			}
 		}
 	}
 	}
 }
-	
 			// Check if this is parity mode (green layer starts with SPQRv*)
 			let combined = null;
 			let parityInfo = null;
 			
-			if (greenText && greenText.startsWith('SPQRv')) {
+		if (greenText && greenText.startsWith('SPQRv')) {
 				console.log('🔐 Parity mode detected, verifying...');
 				const verification = verifyWithParity(baseText, redText, greenText);
 				parityInfo = verification;
 				if (verification.version === 'v2') {
 					// Use reconstructed/corrected outputs when available
-					baseText = verification.base || baseText || '';
-					redText = verification.red || redText || '';
+				if (verification.base) {
+					baseText = verification.base;
+					if (!baseLayer) baseLayer = { text: baseText, source: 'parity-verify' };
+					else baseLayer.text = baseText;
+				}
+				if (verification.red) {
+					redText = verification.red;
+					if (!redLayer) redLayer = { text: redText, source: 'parity-verify' };
+					else redLayer.text = redText;
+				}
 					combined = (baseText || '') + (redText || '');
 					if (verification.baseRecovered || verification.redRecovered) {
 						console.log(`✅ Chunk-level recovery used (baseRecovered=${!!verification.baseRecovered}, redRecovered=${!!verification.redRecovered})`);
@@ -4239,10 +4692,20 @@ if (!baseText && !greenText && !redText) {
 					}
 				} else {
 					// v1 behaviour
-					if (verification.recovered) {
-						const recoveredBase = verification.recovered.layer === 'base' ? verification.recovered.data : baseText;
-						const recoveredRed = verification.recovered.layer === 'red' ? verification.recovered.data : redText;
-						combined = (recoveredBase || '') + (recoveredRed || '');
+				if (verification.recovered) {
+					const recoveredBase = verification.recovered.layer === 'base' ? verification.recovered.data : baseText;
+					const recoveredRed = verification.recovered.layer === 'red' ? verification.recovered.data : redText;
+					if (verification.recovered.layer === 'base' && recoveredBase) {
+						baseText = recoveredBase;
+						if (!baseLayer) baseLayer = { text: recoveredBase, source: 'parity-recover' };
+						else baseLayer.text = recoveredBase;
+					}
+					if (verification.recovered.layer === 'red' && recoveredRed) {
+						redText = recoveredRed;
+						if (!redLayer) redLayer = { text: recoveredRed, source: 'parity-recover' };
+						else redLayer.text = recoveredRed;
+					}
+					combined = (recoveredBase || '') + (recoveredRed || '');
 						console.log(`✅ Data recovered using parity: ${combined.length} bytes`);
 					} else if (verification.valid) {
 						combined = (baseText || '') + (redText || '');
@@ -4296,16 +4759,24 @@ if (!baseText && !greenText && !redText) {
 					} catch(e) {}
 					return null;
 				};
-				const baseRaw = baseText ? baseText : decodeBits(extractRawBits(baseMods));
-				const redRaw  = redText  ? redText  : decodeBits(extractRawBits(redMods));
-				const greenRaw= decodeBits(extractRawBits(greenMods));
+			const baseRaw = baseText ? baseText : decodeBits(extractRawBits(baseMods));
+			const redRaw  = redText  ? redText  : decodeBits(extractRawBits(redMods));
+			const greenRaw= decodeBits(extractRawBits(greenMods));
 				if (greenRaw && greenRaw.startsWith('SPQRv')) {
 					console.log('🔐 Parity (raw) obtained; attempting recovery');
 					const verification = verifyWithParity(baseRaw||'', redRaw||'', greenRaw);
 					parityInfo = verification;
 					if (verification.version === 'v2') {
-						baseText = verification.base || baseText || '';
-						redText  = verification.red  || redText  || '';
+					if (verification.base) {
+						baseText = verification.base;
+						if (!baseLayer) baseLayer = { text: baseText, source: 'parity-verify' };
+						else baseLayer.text = baseText;
+					}
+					if (verification.red) {
+						redText = verification.red;
+						if (!redLayer) redLayer = { text: redText, source: 'parity-verify' };
+						else redLayer.text = redText;
+					}
 						combined = (baseText||'') + (redText||'');
 						console.log('✅ Parity recovery applied (v2)');
 					}
@@ -4325,6 +4796,14 @@ if (!baseText && !greenText && !redText) {
 			}
 		}
 		
+		// Ensure layer meta reflects final text values
+		if (baseLayer) baseLayer.text = baseText || baseLayer.text || null;
+		if (greenLayer) greenLayer.text = greenText || greenLayer.text || null;
+		if (redLayer) redLayer.text = redText || redLayer.text || null;
+		if (!baseLayer && baseText) baseLayer = { text: baseText };
+		if (!greenLayer && greenText) greenLayer = { text: greenText };
+		if (!redLayer && redText) redLayer = { text: redText };
+
 		// Determine mode for UI feedback
 		let detectedMode = 'standard';
 		if (greenText && greenText.startsWith('SPQRv')) {
@@ -4332,15 +4811,24 @@ if (!baseText && !greenText && !redText) {
 		} else if (greenText && greenText.length > 0) {
 			detectedMode = 'hybrid'; // 3 data layers
 		}
+		const chunkHint = (parityInfo && parityInfo.chunkSize) || 64;
+		const layerMeta = {
+			base: baseLayer || null,
+			green: greenLayer || null,
+			red: redLayer || null,
+			chunkSize: chunkHint
+		};
 		
-            return {
+		return {
 			base: baseText,
 			green: greenText,
 			red: redText,
-                combined: combined || null,
+			combined: combined || null,
 			parity: parityInfo,
+			parityInfo,
 			mode: detectedMode,
-			layerType: 'CMYRGB'
+			layerType: 'CMYRGB',
+			meta: layerMeta
 		};
 		
     } catch (error) {
@@ -4454,21 +4942,47 @@ function displayScanResult(result) {
     }
     
     // Show aggregator status if active
-    if (parityAggregator.base || parityAggregator.red || parityAggregator.parity) {
-        const aggBase = parityAggregator.baseBlocks.size > 0;
-        const aggRed = parityAggregator.redBlocks.size > 0;
-        const aggGreen = parityAggregator.greenBlocks.size > 0;
-        const aggParity = parityAggregator.parity != null;
+    if (parityAggregator.progress) {
+        const prog = parityAggregator.progress;
+        const renderLayerSummary = (label, icon, info) => {
+            if (!info) return `<div style="margin: 4px 0; color: #666; font-family: monospace;">${icon} ${label}: awaiting data</div>`;
+            const colour = info.locked === info.total && info.total > 0 ? '#0a0' : (info.locked > 0 || info.partial > 0 ? '#d68b00' : '#666');
+            const partialText = info.partial ? ` (+${info.partial} seen)` : '';
+            return `<div style="margin: 4px 0; color: ${colour}; font-family: monospace;">
+                ${icon} ${label}: ${info.locked}/${info.total} locked${partialText}<br>
+                <span>${info.bar || ''}</span>
+            </div>`;
+        };
         html += `<div style="margin-top: 8px; padding: 8px; background: #f0f8ff; border-left: 3px solid #4a90e2; font-size: 12px;">
-            <strong>📦 Multi-frame aggregator:</strong><br>
-            <span style="color: ${aggBase ? '#0a0' : '#666'}">⬛ ${aggBase ? 'Locked' : 'Empty'}</span> 
-            <span style="color: ${aggRed ? '#0a0' : '#666'}">🟥 ${aggRed ? 'Locked' : 'Empty'}</span> 
-            <span style="color: ${aggGreen || aggParity ? '#0a0' : '#666'}">🟩 ${aggGreen || aggParity ? 'Locked' : 'Empty'}</span>
+            <strong>📦 Multi-frame aggregator (${prog.chunkSize}-char chunks)</strong>
+            ${renderLayerSummary('Base', '⬛', prog.base)}
+            ${renderLayerSummary('Red', '🟥', prog.red)}
+            ${renderLayerSummary('Green/Parity', '🟩', prog.green)}
         </div>`;
     }
+
+	if (lastFrameQualityMetrics) {
+		const { contrast, sharpness, colorRatio } = lastFrameQualityMetrics;
+		let focusHint = '';
+		if (sharpness < 800) {
+			focusHint = 'Very soft focus detected — pull back slightly and try tap-to-focus.';
+		} else if (sharpness < 1500) {
+			focusHint = 'Slight blur — steady your hand or adjust the distance for sharper edges.';
+		} else if (contrast < 60) {
+			focusHint = 'Low contrast — try enabling a torch or better lighting.';
+		}
+		html += `<div style="margin-top: 8px; padding: 8px; background: #eef7ff; border-left: 3px solid #2d7be5; font-size: 12px;">
+			<strong>🔍 Last frame focus metrics</strong><br>
+			<span>Contrast: ${contrast.toFixed(0)} · Sharpness: ${sharpness.toFixed(0)} · Colour: ${(colorRatio * 100).toFixed(0)}%</span>
+			${focusHint ? `<br><em>${focusHint}</em>` : ''}
+		</div>`;
+	}
     
     scanResultDiv.innerHTML = html;
     scanResultDiv.style.display = 'block';
+    
+    // Scroll to scan results after a brief delay to ensure rendering
+    setTimeout(() => smoothScrollToElement(scanResultDiv, 20), 100);
     
     // Auto-fill text box and generate variants
     if (textToUse) {
@@ -4543,7 +5057,6 @@ function matrixFromModules(mods) {
         }
     };
 }
-
 function majorityFilterModules(mods) {
     const n = mods.length;
     const out = Array.from({ length: n }, () => Array(n).fill(false));
@@ -4849,7 +5362,6 @@ function bitsToBytes(bits) {
     }
     return bytes;
     }
-
 // Decode QR code bytes (assumes byte mode)
 function decodeQRBytes(bytes) {
     if (bytes.length < 4) return null;
@@ -4963,3 +5475,133 @@ function sampleCMYRGBFinderPalette(rgba, width, height, modulePx, modulesTotal, 
 	};
 }
 
+function createCameraCMYClassifier(palette) {
+	if (!palette) return null;
+	const required = ['W', 'R', 'G', 'Y', 'K', 'M', 'C', 'B'];
+	for (const key of required) {
+		if (!palette[key] || typeof palette[key].r !== 'number') {
+			return null;
+		}
+	}
+
+	const stats = {
+		rMin: Infinity, rMax: -Infinity,
+		gMin: Infinity, gMax: -Infinity,
+		bMin: Infinity, bMax: -Infinity
+	};
+
+	for (const key of required) {
+		const { r, g, b } = palette[key];
+		if (typeof r === 'number' && typeof g === 'number' && typeof b === 'number') {
+			if (r < stats.rMin) stats.rMin = r;
+			if (r > stats.rMax) stats.rMax = r;
+			if (g < stats.gMin) stats.gMin = g;
+			if (g > stats.gMax) stats.gMax = g;
+			if (b < stats.bMin) stats.bMin = b;
+			if (b > stats.bMax) stats.bMax = b;
+		}
+	}
+
+	const normaliseChannel = (value, channel) => {
+		const min = stats[`${channel}Min`];
+		const max = stats[`${channel}Max`];
+		if (!isFinite(min) || !isFinite(max) || Math.abs(max - min) < 5) {
+			return Math.min(1, Math.max(0, value / 255));
+		}
+		return Math.min(1, Math.max(0, (value - min) / (max - min)));
+	};
+
+	const normalisedPalette = {};
+	for (const key of required) {
+		const { r, g, b } = palette[key];
+		normalisedPalette[key] = {
+			r: normaliseChannel(r, 'r'),
+			g: normaliseChannel(g, 'g'),
+			b: normaliseChannel(b, 'b')
+		};
+	}
+
+	const avg = (arr) => arr.length ? arr.reduce((sum, v) => sum + v, 0) / arr.length : 0;
+	const configs = {};
+	const computeConfig = (bitIndex, channelKey) => {
+		const withVals = [];
+		const withoutVals = [];
+		for (const [name, code] of Object.entries(CMYRGB_COLOR_CODES)) {
+			const normalised = normalisedPalette[name];
+			if (!normalised) continue;
+			const value = normalised[channelKey];
+			if (((code >> bitIndex) & 1) === 1) {
+				withVals.push(value);
+			} else {
+				withoutVals.push(value);
+			}
+		}
+		if (!withVals.length || !withoutVals.length) {
+			return { threshold: 0.5, polarity: 'less', separation: 0, withAvg: avg(withVals), withoutAvg: avg(withoutVals) };
+		}
+		const withAvg = avg(withVals);
+		const withoutAvg = avg(withoutVals);
+		const threshold = (withAvg + withoutAvg) / 2;
+		const polarity = withAvg <= withoutAvg ? 'less' : 'greater';
+		return {
+			threshold,
+			polarity,
+			separation: Math.abs(withAvg - withoutAvg),
+			withAvg,
+			withoutAvg
+		};
+	};
+
+	configs.c = computeConfig(2, 'r');
+	configs.m = computeConfig(1, 'g');
+	configs.y = computeConfig(0, 'b');
+
+	const separation = Math.min(configs.c.separation, configs.m.separation, configs.y.separation);
+
+	const decideBit = (value, config) => {
+		if (config.polarity === 'greater') {
+			return value >= config.threshold ? 1 : 0;
+		}
+		return value <= config.threshold ? 1 : 0;
+	};
+
+	const classify = (r, g, b) => {
+		const nr = normaliseChannel(r, 'r');
+		const ng = normaliseChannel(g, 'g');
+		const nb = normaliseChannel(b, 'b');
+
+		const cBit = decideBit(nr, configs.c);
+		const mBit = decideBit(ng, configs.m);
+		const yBit = decideBit(nb, configs.y);
+		let colourIndex = (cBit << 2) | (mBit << 1) | yBit;
+		let candidate = CMYRGB_INDEX_TO_COLOR[colourIndex] || 'W';
+
+		const pixelNorm = { r: nr, g: ng, b: nb };
+		let bestColour = candidate;
+		let bestDist = Number.POSITIVE_INFINITY;
+		for (const [name, sample] of Object.entries(normalisedPalette)) {
+			const dist = Math.hypot(sample.r - pixelNorm.r, sample.g - pixelNorm.g, sample.b - pixelNorm.b);
+			if (dist < bestDist) {
+				bestDist = dist;
+				bestColour = name;
+			}
+		}
+
+		const candidateSample = normalisedPalette[candidate];
+		const candidateDist = candidateSample ? Math.hypot(candidateSample.r - pixelNorm.r, candidateSample.g - pixelNorm.g, candidateSample.b - pixelNorm.b) : Number.POSITIVE_INFINITY;
+		const separationOk = separation > 0.06;
+		if (!separationOk || candidateDist > bestDist * 1.25) {
+			candidate = bestColour;
+		}
+
+		return candidate || bestColour || 'W';
+	};
+
+	return {
+		classify,
+		configs,
+		stats,
+		normalisedPalette,
+		separation
+	};
+}

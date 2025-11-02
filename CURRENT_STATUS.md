@@ -23,7 +23,13 @@
    - Console logs show "🧩 Layer: reconstructed N bytes from M locked blocks"
    - **Advantage**: 3-layer codes have lower density per layer, making them easier to scan than parity mode
 
-4. **Focus Assistance Patterns**:
+4. **Perspective Warp for Camera Frames (2025-11-01b)**:
+   - Sample RGB data after warping camera frames to a canonical square using finder-based bilinear mapping
+   - Greatly improves decoding of angled photos (no longer assumes orthographic capture)
+   - Automatic fallback to old axis-aligned crop if finders are missing
+   - Applies light blur when high-frequency banding detected to reduce screen moiré artefacts
+
+5. **Focus Assistance Patterns**:
    - Added corner brackets (L-shaped black lines in all 4 corners)
    - Added "SPQR" text label at bottom margin
    - These high-contrast patterns help phone autofocus systems (both phase-detect and contrast-detect) lock onto flat screens
