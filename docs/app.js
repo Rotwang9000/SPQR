@@ -2182,7 +2182,7 @@ async function scanFromVideo() {
 		}
 		
 		// Try standard QR detection first (fast and gives location)
-		const code = jsQR(imageData.data, imageData.width, imageData.height, {
+		let code = jsQR(imageData.data, imageData.width, imageData.height, {
 			inversionAttempts: "dontInvert"
 		});
 		
@@ -2203,6 +2203,33 @@ async function scanFromVideo() {
 			scanPauseUntil = Date.now() + 1500;
 			requestAnimationFrame(scanFromVideo);
 			return;
+		}
+		
+		// jsQR failed direct decode - try with grid-based ROI extraction for better focus/distortion handling
+		const gridForMono = locateQRStructure(imageData.data, imageData.width, imageData.height);
+		if (gridForMono && gridForMono.qrModules && gridForMono.modulePx) {
+			// Try decoding from extracted ROI
+			try {
+				const roiResult = await decodeFromGridROI(imageData, gridForMono, 8);
+				if (roiResult && roiResult.standard) {
+					drawGridRect(overlayCtx, gridForMono.originX, gridForMono.originY, 
+						(gridForMono.qrModules + 8) * gridForMono.modulePx, 
+						(gridForMono.qrModules + 8) * gridForMono.modulePx, '#00ff00');
+					status.textContent = '✅ Standard QR decoded (ROI)!';
+					status.style.background = 'rgba(0, 200, 0, 0.8)';
+					lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
+					
+					if (roiResult.standard !== lastDecodedText) {
+						lastDecodedText = roiResult.standard;
+						handleScannedCode(roiResult.standard);
+					}
+					scanPauseUntil = Date.now() + 1500;
+					requestAnimationFrame(scanFromVideo);
+					return;
+				}
+			} catch (err) {
+				console.log('   ⚠️  ROI decode attempt failed:', err.message);
+			}
 		}
 		
 		// No direct decode - try to locate structure using our finder analysis

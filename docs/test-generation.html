@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>SPQR Generation Verification</title>
+	<style>
+		body {
+			font-family: 'Courier New', monospace;
+			max-width: 1200px;
+			margin: 20px auto;
+			padding: 20px;
+			background: #1e1e1e;
+			color: #d4d4d4;
+		}
+		h1 { color: #4ec9b0; }
+		.test-section {
+			background: #252526;
+			border: 1px solid #3e3e42;
+			border-radius: 4px;
+			padding: 15px;
+			margin: 20px 0;
+		}
+		.test-result {
+			margin: 10px 0;
+			padding: 8px;
+			background: #1e1e1e;
+			border-left: 3px solid #007acc;
+			font-size: 13px;
+			white-space: pre-wrap;
+			word-break: break-all;
+		}
+		.pass { border-left-color: #4ec9b0; }
+		.fail { border-left-color: #f48771; }
+		button {
+			background: #0e639c;
+			color: white;
+			border: none;
+			padding: 10px 20px;
+			border-radius: 3px;
+			cursor: pointer;
+			font-size: 14px;
+			margin: 5px;
+		}
+		button:hover { background: #1177bb; }
+		textarea {
+			width: 100%;
+			min-height: 100px;
+			background: #1e1e1e;
+			color: #d4d4d4;
+			border: 1px solid #3e3e42;
+			padding: 8px;
+			font-family: 'Courier New', monospace;
+			font-size: 13px;
+		}
+		.layer-info {
+			display: inline-block;
+			margin: 5px 10px;
+			padding: 5px 10px;
+			background: #264f78;
+			border-radius: 3px;
+		}
+		.qr-display {
+			display: inline-block;
+			margin: 10px;
+			text-align: center;
+		}
+		.qr-display svg {
+			border: 2px solid #3e3e42;
+			background: white;
+		}
+		.qr-label {
+			margin-top: 5px;
+			font-size: 12px;
+			color: #858585;
+		}
+	</style>
+</head>
+<body>
+	<h1>🔬 SPQR Generation Verification</h1>
+	
+	<div class="test-section">
+		<h2>Test Input</h2>
+		<textarea id="testInput">ABCD</textarea>
+		<br>
+		<button onclick="runTests()">🧪 Run Tests</button>
+		<button onclick="clearResults()">🗑️ Clear</button>
+	</div>
+	
+	<div id="results"></div>
+	
+	<script src="qrcode.min.js"></script>
+	<script>
+		// Minimal splitPayload function
+		function splitPayload(payload, splits) {
+			splits = Math.max(1, Math.min(3, splits|0));
+			const size = Math.ceil(payload.length / splits);
+			const parts = [];
+			for (let i = 0; i < splits; i++) parts.push(payload.slice(i*size, (i+1)*size));
+			return parts;
+		}
+		
+		async function runTests() {
+			const input = document.getElementById('testInput').value;
+			const results = document.getElementById('results');
+			results.innerHTML = '<h2>📊 Test Results</h2>';
+			
+			// Test 1: Verify splitPayload
+			results.innerHTML += '<div class="test-section"><h3>Test 1: Payload Splitting</h3>';
+			
+			const splits2 = splitPayload(input, 2);
+			const splits3 = splitPayload(input, 3);
+			
+			results.innerHTML += `<div class="test-result">Input: "${input}" (${input.length} chars)</div>`;
+			results.innerHTML += `<div class="test-result">2-way split (BWRG): [${splits2.map(s => `"${s}"`).join(', ')}]`;
+			results.innerHTML += `<span class="layer-info">Layer 1: ${splits2[0].length}ch</span>`;
+			results.innerHTML += `<span class="layer-info">Layer 2: ${splits2[1].length}ch</span></div>`;
+			
+			results.innerHTML += `<div class="test-result">3-way split (CMYRGB): [${splits3.map(s => `"${s}"`).join(', ')}]`;
+			results.innerHTML += `<span class="layer-info">Layer 1: ${splits3[0].length}ch</span>`;
+			results.innerHTML += `<span class="layer-info">Layer 2: ${splits3[1].length}ch</span>`;
+			results.innerHTML += `<span class="layer-info">Layer 3: ${splits3[2].length}ch</span></div>`;
+			
+			results.innerHTML += '</div>';
+			
+			// Test 2: Generate actual QR codes for each layer
+			results.innerHTML += '<div class="test-section"><h3>Test 2: Individual Layer QR Codes</h3>';
+			results.innerHTML += '<p>Generating QR codes for each layer independently (all EC Level L):</p>';
+			
+			try {
+				// BWRG layers
+				const bwrgQRs = splits2.map((text, i) => {
+					const qr = qrcode(0, 'L');
+					qr.addData(text);
+					qr.make();
+					return {
+						text,
+						modules: qr.getModuleCount(),
+						svg: qr.createSvgTag(4, 0)
+					};
+				});
+				
+				results.innerHTML += '<div style="margin: 10px 0;"><strong>BWRG (2-layer):</strong></div>';
+				bwrgQRs.forEach((qr, i) => {
+					results.innerHTML += `<div class="qr-display">
+						<div>${qr.svg}</div>
+						<div class="qr-label">Layer ${i+1}: "${qr.text}"<br>${qr.modules}×${qr.modules} modules</div>
+					</div>`;
+				});
+				
+				const bwrgMaxModules = Math.max(...bwrgQRs.map(q => q.modules));
+				const bwrgVersion = Math.round((bwrgMaxModules - 17) / 4);
+				results.innerHTML += `<div class="test-result pass">BWRG Version: ${bwrgVersion} (${bwrgMaxModules}×${bwrgMaxModules} modules)</div>`;
+				
+				// CMYRGB layers
+				const cmyrgbQRs = splits3.map((text, i) => {
+					const qr = qrcode(0, 'L');
+					qr.addData(text);
+					qr.make();
+					return {
+						text,
+						modules: qr.getModuleCount(),
+						svg: qr.createSvgTag(4, 0)
+					};
+				});
+				
+				results.innerHTML += '<div style="margin: 10px 0; clear: both;"><strong>CMYRGB (3-layer):</strong></div>';
+				cmyrgbQRs.forEach((qr, i) => {
+					results.innerHTML += `<div class="qr-display">
+						<div>${qr.svg}</div>
+						<div class="qr-label">Layer ${i+1}: "${qr.text}"<br>${qr.modules}×${qr.modules} modules</div>
+					</div>`;
+				});
+				
+				const cmyrgbMaxModules = Math.max(...cmyrgbQRs.map(q => q.modules));
+				const cmyrgbVersion = Math.round((cmyrgbMaxModules - 17) / 4);
+				results.innerHTML += `<div class="test-result pass">CMYRGB Version: ${cmyrgbVersion} (${cmyrgbMaxModules}×${cmyrgbMaxModules} modules)</div>`;
+				
+				// Test 3: Density comparison
+				results.innerHTML += '<div style="clear: both;"></div></div>';
+				results.innerHTML += '<div class="test-section"><h3>Test 3: Density Analysis</h3>';
+				
+				// Monochrome baseline
+				const monoQR = qrcode(0, 'L');
+				monoQR.addData(input);
+				monoQR.make();
+				const monoModules = monoQR.getModuleCount();
+				const monoVersion = Math.round((monoModules - 17) / 4);
+				
+				results.innerHTML += `<div class="test-result">Monochrome: ${input.length} chars → Version ${monoVersion} (${monoModules}×${monoModules} = ${monoModules*monoModules} modules)</div>`;
+				results.innerHTML += `<div class="test-result">BWRG (2-layer): ${input.length} chars → Version ${bwrgVersion} (${bwrgMaxModules}×${bwrgMaxModules} = ${bwrgMaxModules*bwrgMaxModules} modules total across both layers)</div>`;
+				results.innerHTML += `<div class="test-result">CMYRGB (3-layer): ${input.length} chars → Version ${cmyrgbVersion} (${cmyrgbMaxModules}×${cmyrgbMaxModules} = ${cmyrgbMaxModules*cmyrgbMaxModules} modules per layer, ${cmyrgbMaxModules*cmyrgbMaxModules*3} total)</div>`;
+				
+				const bwrgDensity = (input.length / (bwrgMaxModules * bwrgMaxModules * 2)).toFixed(4);
+				const cmyrgbDensity = (input.length / (cmyrgbMaxModules * cmyrgbMaxModules * 3)).toFixed(4);
+				const monoDensity = (input.length / (monoModules * monoModules)).toFixed(4);
+				
+				results.innerHTML += `<div class="test-result ${cmyrgbMaxModules <= monoModules ? 'pass' : 'fail'}">
+					<strong>Density (chars/module):</strong><br>
+					Monochrome: ${monoDensity}<br>
+					BWRG: ${bwrgDensity}<br>
+					CMYRGB: ${cmyrgbDensity}<br>
+					<br>
+					<strong>Visual Size Comparison:</strong><br>
+					Monochrome: ${monoModules}×${monoModules}<br>
+					BWRG: ${bwrgMaxModules}×${bwrgMaxModules} (${bwrgMaxModules <= monoModules ? '✓ SMALLER OR EQUAL' : '✗ LARGER'})<br>
+					CMYRGB: ${cmyrgbMaxModules}×${cmyrgbMaxModules} (${cmyrgbMaxModules <= monoModules ? '✓ SMALLER OR EQUAL' : '✗ LARGER'})
+				</div>`;
+				
+				// Display monochrome for comparison
+				results.innerHTML += '<div style="margin: 20px 0;"><strong>Monochrome Reference:</strong></div>';
+				results.innerHTML += `<div class="qr-display">
+					<div>${monoQR.createSvgTag(4, 0)}</div>
+					<div class="qr-label">Monochrome: "${input}"<br>${monoModules}×${monoModules} modules</div>
+				</div>`;
+				
+			} catch (error) {
+				results.innerHTML += `<div class="test-result fail">Error: ${error.message}</div>`;
+			}
+			
+			results.innerHTML += '</div>';
+		}
+		
+		function clearResults() {
+			document.getElementById('results').innerHTML = '';
+		}
+		
+		// Auto-run on load
+		window.addEventListener('load', () => runTests());
+	</script>
+</body>
+</html>
+
