@@ -14,6 +14,170 @@ function smoothScrollToElement(element, offset = 0) {
 	});
 }
 
+function buildFocusDecorations(width, height) {
+	const minDim = Math.min(width, height);
+	const stroke = Math.max(2, Math.round(minDim * 0.012));
+	const cornerSize = Math.max(stroke * 6, Math.round(minDim * 0.14));
+	const inset = Math.max(stroke * 2, Math.round(minDim * 0.035));
+	const textSize = Math.max(10, Math.round(minDim * 0.06));
+	const textY = Math.min(height - stroke * 1.5, height - inset * 0.6);
+	const tl = `M ${inset + cornerSize},${inset} L ${inset},${inset} L ${inset},${inset + cornerSize}`;
+	const tr = `M ${width - inset - cornerSize},${inset} L ${width - inset},${inset} L ${width - inset},${inset + cornerSize}`;
+	const bl = `M ${inset},${height - inset - cornerSize} L ${inset},${height - inset} L ${inset + cornerSize},${height - inset}`;
+	const br = `M ${width - inset - cornerSize},${height - inset} L ${width - inset},${height - inset} L ${width - inset},${height - inset - cornerSize}`;
+	return `
+		<g class="focus-aids" fill="none" stroke="#000" stroke-width="${stroke}" opacity="0.55">
+			<path d="${tl}" />
+			<path d="${tr}" />
+			<path d="${bl}" />
+			<path d="${br}" />
+		</g>
+		<text x="${width / 2}" y="${textY}" font-family="monospace" font-size="${textSize}" font-weight="bold" text-anchor="middle" fill="#555">SPQR</text>
+	`;
+}
+
+function isMobileViewport() {
+	return window.matchMedia ? window.matchMedia('(max-width: 768px)').matches : window.innerWidth <= 768;
+}
+
+function stopCamera(message = '📷 Camera stopped', { resetAggregators = false } = {}) {
+	const video = document.getElementById('video');
+	const btn = document.getElementById('cameraBtn');
+	const preview = document.getElementById('camera-preview');
+	const status = document.getElementById('scan-status');
+	const progressPanel = document.getElementById('scan-progress');
+	const overlay = document.getElementById('overlay-canvas');
+	
+	if (currentStream) {
+		currentStream.getTracks().forEach(track => track.stop());
+		currentStream = null;
+	}
+	
+	if (video) {
+		video.pause();
+		video.srcObject = null;
+	}
+	
+	if (preview) {
+		preview.style.display = 'none';
+	}
+	
+	if (btn) {
+		btn.textContent = '📷 Use Camera';
+	}
+	
+	if (status) {
+		status.textContent = message;
+		status.style.background = 'rgba(0, 128, 0, 0.85)';
+	}
+	
+	if (overlay) {
+		const ctx = overlay.getContext('2d');
+		if (ctx) ctx.clearRect(0, 0, overlay.width, overlay.height);
+	}
+	
+	if (progressPanel) {
+		if (resetAggregators) {
+			progressPanel.classList.add('hidden');
+			progressPanel.innerHTML = '';
+		}
+	}
+	
+	if (resetAggregators) {
+		resetParityAggregator();
+		bestFrameQuality = 0;
+		lastFrameQualityMetrics = null;
+		lastScanState = { found: false, decoded: false, lastUpdate: 0 };
+		lastDecodedText = null;
+		scanPauseUntil = 0;
+	}
+}
+
+async function startCamera() {
+	const video = document.getElementById('video');
+	const btn = document.getElementById('cameraBtn');
+	const preview = document.getElementById('camera-preview');
+	const status = document.getElementById('scan-status');
+	const progressPanel = document.getElementById('scan-progress');
+	
+	if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+		if (status) {
+			status.textContent = '❌ Camera not supported on this device';
+			status.style.background = 'rgba(128, 0, 0, 0.85)';
+		}
+		return;
+	}
+	
+	try {
+		resetParityAggregator();
+		bestFrameQuality = 0;
+		lastFrameQualityMetrics = null;
+		lastScanState = { found: false, decoded: false, lastUpdate: 0 };
+		lastDecodedText = null;
+		scanPauseUntil = 0;
+		if (progressPanel) {
+			progressPanel.classList.add('hidden');
+			progressPanel.innerHTML = '';
+		}
+		
+		if (preview) {
+			preview.style.display = 'block';
+		}
+		
+		if (status) {
+			status.textContent = 'Starting camera...';
+			status.style.background = 'rgba(0, 0, 0, 0.7)';
+		}
+		
+		setTimeout(() => smoothScrollToElement(preview || btn, isMobileViewport() ? 0 : 20), 100);
+		
+		currentStream = await navigator.mediaDevices.getUserMedia({
+			video: {
+				facingMode: 'environment',
+				width: { ideal: 1920 },
+				height: { ideal: 1080 },
+				advanced: [
+					{ focusMode: 'continuous' },
+					{ pointsOfInterest: [{ x: 0.5, y: 0.5 }] }
+				]
+			}
+		});
+		
+		if (!video) return;
+		
+		video.srcObject = currentStream;
+		await video.play();
+		
+		if (btn) {
+			btn.textContent = '🛑 Stop Camera';
+		}
+		
+		if (status) {
+			status.textContent = '📷 Scanning... Keep the code within the frame';
+			status.style.background = 'rgba(0, 0, 0, 0.7)';
+		}
+		
+		try { initCameraControls(currentStream, video); } catch (e) {}
+		requestAnimationFrame(scanFromVideo);
+	} catch (error) {
+		console.error('Camera error:', error);
+		if (status) {
+			status.textContent = '❌ Camera error: ' + error.message;
+			status.style.background = 'rgba(128, 0, 0, 0.85)';
+		}
+		if (btn) {
+			btn.textContent = '📷 Use Camera';
+		}
+		if (preview) {
+			setTimeout(() => { preview.style.display = 'none'; }, 2500);
+		}
+		if (currentStream) {
+			currentStream.getTracks().forEach(track => track.stop());
+			currentStream = null;
+		}
+	}
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     // Check if required libraries are available
     if (typeof jsQR === 'undefined') {
@@ -98,13 +262,16 @@ async function generateStandardQR(text) {
 		const qr = qrcode(0, 'L');
 		qr.addData(text);
 		qr.make();
-		const svg = qr.createSvgTag(4, 2); // module size, margin
-		// Render to canvas to provide PNG data URL
+		let svg = qr.createSvgTag(4, 2); // module size, margin
 		const tmp = document.createElement('div');
 		tmp.innerHTML = svg;
-		const svgEl = tmp.firstChild;
+		let svgEl = tmp.firstChild;
 		const width = parseInt(svgEl.getAttribute('width') || '200');
 		const height = parseInt(svgEl.getAttribute('height') || '200');
+		const decorations = buildFocusDecorations(width, height);
+		svg = svg.replace('</svg>', `${decorations}</svg>`);
+		tmp.innerHTML = svg;
+		svgEl = tmp.firstChild;
 		const canvas = document.createElement('canvas');
 		canvas.width = width;
 		canvas.height = height;
@@ -221,18 +388,6 @@ async function generateSpqrClient(text, options) {
 	// White background
 	svg += `<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`;
 
-	// Focus assistance patterns (high-contrast targets for phone autofocus on flat screens)
-	// Add corner brackets in margin (2px thick lines in top-left corner)
-	const focusSize = Math.max(12, Math.floor(margin * cell * 0.3));
-	const focusStroke = Math.max(1, Math.floor(cell * 0.4));
-	svg += `<path d="M ${focusSize},${focusStroke/2} L ${focusStroke/2},${focusStroke/2} L ${focusStroke/2},${focusSize}" stroke="#000" stroke-width="${focusStroke}" fill="none"/>`;
-	svg += `<path d="M ${width-focusSize},${focusStroke/2} L ${width-focusStroke/2},${focusStroke/2} L ${width-focusStroke/2},${focusSize}" stroke="#000" stroke-width="${focusStroke}" fill="none"/>`;
-	svg += `<path d="M ${focusSize},${height-focusStroke/2} L ${focusStroke/2},${height-focusStroke/2} L ${focusStroke/2},${height-focusSize}" stroke="#000" stroke-width="${focusStroke}" fill="none"/>`;
-	svg += `<path d="M ${width-focusSize},${height-focusStroke/2} L ${width-focusStroke/2},${height-focusStroke/2} L ${width-focusStroke/2},${height-focusSize}" stroke="#000" stroke-width="${focusStroke}" fill="none"/>`;
-	// Add text label "SPQR" at bottom margin (high-frequency pattern for phase-detect AF)
-	const fontSize = Math.max(8, Math.floor(margin * cell * 0.6));
-	svg += `<text x="${width/2}" y="${height - fontSize/2}" font-family="monospace" font-size="${fontSize}" font-weight="bold" text-anchor="middle" fill="#888">SPQR</text>`;
-
 	// Draw modules
 	for (let y = 0; y < modules; y++) {
 		for (let x = 0; x < modules; x++) {
@@ -275,6 +430,8 @@ async function generateSpqrClient(text, options) {
 
 	// Draw colour keys inside inner 3x3
 	drawFinderKeys(svgAdd => { svg += svgAdd; }, modules, margin, cell, colours, isEightColour);
+
+	svg += buildFocusDecorations(width, height);
 
 	svg += `</svg>`;
 
@@ -521,7 +678,6 @@ function makeQrAuto(text, ecc) {
 	qr.make();
 	return qr;
 }
-
 function makeQrFixed(version, ecc, text) {
 	try {
 		const qr = qrcode(version, ecc);
@@ -622,7 +778,6 @@ async function svgToPngDataUrl(svg, width, height) {
 	ctx.drawImage(img, 0, 0, width, height);
 	return canvas.toDataURL('image/png');
 }
-
 // Estimate the module size (in pixels) by scanning for the periodicity of black/white transitions
 function estimateModulePx(width, height, mask) {
 	// Prefer the smaller dimension for robustness
@@ -1151,7 +1306,6 @@ async function handleECModeChange(e) {
         cmyrgbDisplay.innerHTML = '<div class="error">❌ Failed to regenerate</div>';
     }
 }
-
 // Update EC mode description text
 function updateECModeDescription() {
     const descEl = document.querySelector('.ec-mode-description');
@@ -1268,7 +1422,6 @@ async function updateBWRGColors() {
         }
     }
 }
-
 async function updateCMYRGBColors() {
     const colorOrder = ['white', 'red', 'green', 'yellow', 'black', 'magenta', 'cyan', 'blue'];
     window.cmyrgbColors = colorOrder.map(c => {
@@ -1370,60 +1523,11 @@ function setupDownloadLink(elementId, content, mimeType) {
 }
 
 async function toggleCamera() {
-	const video = document.getElementById('video');
-	const btn = document.getElementById('cameraBtn');
-	const preview = document.getElementById('camera-preview');
-	const status = document.getElementById('scan-status');
-	
 	if (currentStream) {
-		// Stop camera
-		currentStream.getTracks().forEach(track => track.stop());
-		currentStream = null;
-		preview.style.display = 'none';
-		btn.textContent = '📷 Use Camera';
-		resetParityAggregator();
-		bestFrameQuality = 0;
-		lastFrameQualityMetrics = null;
-	} else {
-		// Start camera
-		try {
-			status.textContent = 'Starting camera...';
-			preview.style.display = 'block';
-			
-			// Scroll to camera preview after a brief delay to ensure it's rendered
-			setTimeout(() => smoothScrollToElement(preview, 20), 100);
-			
-			currentStream = await navigator.mediaDevices.getUserMedia({ 
-				video: { 
-					facingMode: 'environment', 
-					width: { ideal: 1920 }, 
-					height: { ideal: 1080 },
-					advanced: [
-						{ focusMode: 'continuous' },
-						{ pointsOfInterest: [{ x: 0.5, y: 0.5 }] }
-					]
-				} 
-			});
-			video.srcObject = currentStream;
-			await video.play(); // Wait for video to start playing
-			btn.textContent = '🛑 Stop Camera';
-			
-			status.textContent = '📷 Scanning... Point camera at QR code';
-			resetParityAggregator();
-			bestFrameQuality = 0;
-			lastFrameQualityMetrics = null;
-			
-			// Try to enable camera controls: autofocus/zoom/torch if supported
-			try { initCameraControls(currentStream, video); } catch (e) { /* ignore */ }
-			
-			// Start scanning
-			scanFromVideo();
-		} catch (error) {
-			console.error('Camera error:', error);
-			status.textContent = '❌ Camera error: ' + error.message;
-			setTimeout(() => preview.style.display = 'none', 3000);
-		}
+		stopCamera('📷 Camera stopped', { resetAggregators: true });
+		return;
 	}
+	await startCamera();
 }
 
 let lastScanState = { found: false, decoded: false, lastUpdate: 0 };
@@ -1581,7 +1685,6 @@ function updateBlockAggregatorWithSpqr(spqrObj) {
 
     return aggregated;
 }
-
 function buildAggregatorProgressSnapshot() {
     const chunkSize = parityAggregator.chunkSize;
     const maxDisplay = 24;
@@ -1621,7 +1724,6 @@ function buildAggregatorProgressSnapshot() {
         green: summarise(parityAggregator.greenBlocks, parityAggregator.expected.green)
     };
 }
-
 function updateParityAggregatorWithSpqr(spqrObj) {
     if (!spqrObj || typeof spqrObj !== 'object') return null;
     // Accept decoded layer strings if present
@@ -1792,7 +1894,6 @@ function resampleGridToSquare(imageData, grid, targetModulePx, extraMarginModule
 		source: 'perspective'
 	};
 }
-
 function applyBoxBlur(rgba, width, height, radius = 1) {
 	if (radius <= 0) return;
 	const tmp = new Uint8ClampedArray(rgba.length);
@@ -1859,7 +1960,6 @@ function resampleNearest(src, sw, sh, dw, dh) {
 	}
 	return dst;
 }
-
 function makeImageDataFromRgba(rgba, w, h) { return new ImageData(rgba, w, h); }
 
 function enhanceImageContrast(rgba, width, height) {
@@ -2176,7 +2276,6 @@ function drawGridRect(ctx, x, y, w, h, color = '#ff9900') {
 	ctx.lineWidth = 3;
 	ctx.strokeRect(Math.max(0,x), Math.max(0,y), Math.max(0,w), Math.max(0,h));
 }
-
 // Camera controls: focus/zoom/torch and tap-to-focus
 function initCameraControls(stream, video) {
     const track = stream.getVideoTracks()[0];
@@ -2238,7 +2337,6 @@ function initCameraControls(stream, video) {
         track.applyConstraints({ advanced: [{ zoom: target }] }).catch(()=>{});
     }
 }
-
 // Compute a simple frame quality score to prioritise better frames for heavy decoding
 function computeFrameQuality(imageData, grid) {
     const { data, width, height } = imageData;
@@ -2811,7 +2909,6 @@ function refineGridOrigin(data, width, height, modules, margin, modulePx) {
     }
     return { originX: best.originX, originY: best.originY };
 }
-
 function scoreFindersAtOrigin(data, width, height, modules, margin, modulePx, offX, offY) {
     // Evaluate how well the three 7x7 finders match black/white pattern
     const centers = [
@@ -2838,7 +2935,6 @@ function scoreFindersAtOrigin(data, width, height, modules, margin, modulePx, of
     }
     return score;
 }
-
 function extractAndDecodeColorLayers(data, width, height, gridInfo) {
     const { modules, margin, modulePx } = gridInfo;
     const baseOffsetX = gridInfo.originX ?? 0;
@@ -3025,7 +3121,6 @@ function majorityFilterInPlace(binary) {
         for (let x = 0; x < m; x++) binary[y][x] = out[y][x];
     }
 }
-
 // Direct SPQR decoder using color-aware approach
 function decodeSPQRDirect(imageData) {
     const { data, width, height } = imageData;
@@ -3153,7 +3248,7 @@ function decodeSPQRDirect(imageData) {
         const redResult = decodeLayer(redLayer, 'Red layer');
         
         const results = [baseResult, redResult].filter(Boolean);
-        const combined = results.join('');
+        const combined = results.length > 1 ? results.join(' | ') : results[0];
         
         return {
             base: baseResult || 'Base layer decode failed',
@@ -3487,7 +3582,6 @@ function clusterFinders(candidates) {
     // Return top 3 strongest clusters
     return clusters.sort((a, b) => b.count - a.count).slice(0, 3);
 }
-
 // Order three finders as topLeft, topRight, bottomLeft
 function orderFinders(f1, f2, f3) {
     // Calculate distances
@@ -3667,7 +3761,6 @@ function drawFinderPattern(binary, width, height, startX, startY, modulePx) {
         }
     }
 }
-
 function decodeQRData(extracted) {
     // Use jsQR directly on the extracted RGBA data
     try {
@@ -3956,6 +4049,17 @@ function decodeSPQRLayers(imageData) {
 		
 		// Step 4: Use jsQR to decode each layer
 		const decodeLayer = (mods, layerName) => {
+			if (typeof window.decodeMatrixGuessMask === 'function') {
+				try {
+					const coreRes = decodeMatrixGuessMaskBrowser(mods);
+					if (coreRes && coreRes.text) {
+						console.log(`   ✅ ${layerName} (decoderCore mask=${coreRes.mask ?? 'n/a'}) → "${coreRes.text}"`);
+						return coreRes.text;
+					}
+				} catch (err) {
+					console.log(`   ⚠️  decoderCore failed for ${layerName}: ${err.message}`);
+				}
+			}
 			// Scale up for jsQR (now has alignment patterns so moderate scale is fine)
 			const scale = 8;
 			const scaledSize = modules * scale;
@@ -4392,6 +4496,23 @@ function decodeCMYRGBLayers(imageData) {
 				chunks: details.chunks || null
 			};
 		};
+		if (typeof window.decodeMatrixGuessMask === 'function') {
+			try {
+				const coreRes = decodeMatrixGuessMaskBrowser(mods);
+				if (coreRes && coreRes.text) {
+					console.log(`   ✅ ${layerName} (decoderCore mask=${coreRes.mask ?? 'n/a'}) → "${coreRes.text}"`);
+					return buildResult(coreRes.text, {
+						source: 'decoderCore',
+						scale: null,
+						version: coreRes.version,
+						eccLevel: null,
+						maskPattern: coreRes.mask ?? null
+					});
+				}
+			} catch (err) {
+				console.log(`   ⚠️  decoderCore failed for ${layerName}: ${err.message}`);
+			}
+		}
 		// Try multiple scaling factors (jsQR is finicky about scale)
 		const scales = [8, 12, 16, 4, 6, 10];
 		
@@ -4847,120 +4968,166 @@ function handleScannedCode(data) {
 }
 
 function displayScanResult(result) {
-    const scanResultDiv = document.getElementById('scanResult');
-    
-    let html = '<h3>📱 Scan Results:</h3>';
-    let textToUse = null;
-    
-    if (result.standard) {
-        textToUse = result.standard;
-        html += `<div class="scan-result-item success">
-            <strong>✅ Standard QR Code decoded!</strong><br>
-            <small>${result.standard.length} characters</small>
-        </div>`;
-    }
-    
-    if (result.spqr) {
-        const hasBase = result.spqr.base && result.spqr.base.length > 0 && !result.spqr.base.startsWith('Error:');
-        const hasRed = result.spqr.red && result.spqr.red.length > 0;
-        const hasGreen = result.spqr.green && result.spqr.green.length > 0;
-        const hasParity = result.spqr.parity || (result.spqr.green && result.spqr.green.startsWith && result.spqr.green.startsWith('SPQRv'));
-        
-        // Determine mode - prefer decoder-provided mode
-        let mode = result.spqr.mode || 'unknown';
-        let layerType = result.spqr.layerType || 'SPQR';
-        let layerCount = layerType === 'BWRG' ? 2 : 3;
-        
-        // Fallback to inference if mode not provided
-        if (mode === 'unknown') {
-            if (hasParity) {
-                mode = 'parity';
-                layerCount = 3;
-            } else if (hasGreen) {
-                mode = 'standard/hybrid';
-                layerCount = 3;
-            } else if (hasBase || hasRed) {
-                mode = 'BWRG';
-                layerCount = 2;
-            }
-        }
-        
-        // Build layer status display
-        let layerStatus = '<div style="margin: 8px 0; font-family: monospace; font-size: 14px;">';
-        if (layerCount === 3) {
-            layerStatus += `<span style="color: ${hasBase ? '#0a0' : '#a00'}">⬛ Base ${hasBase ? '✓' : '✗'}</span> `;
-            layerStatus += `<span style="color: ${hasRed ? '#0a0' : '#a00'}">🟥 Red ${hasRed ? '✓' : '✗'}</span> `;
-            if (hasParity) {
-                layerStatus += `<span style="color: ${hasParity ? '#0a0' : '#a00'}">🟩 Parity ${hasParity ? '✓' : '✗'}</span>`;
-            } else {
-                layerStatus += `<span style="color: ${hasGreen ? '#0a0' : '#a00'}">🟩 Green ${hasGreen ? '✓' : '✗'}</span>`;
-            }
-        } else if (layerCount === 2) {
-            layerStatus += `<span style="color: ${hasBase ? '#0a0' : '#a00'}">⬛ Base ${hasBase ? '✓' : '✗'}</span> `;
-            layerStatus += `<span style="color: ${hasRed ? '#0a0' : '#a00'}">🟥 Red ${hasRed ? '✓' : '✗'}</span>`;
-        }
-        layerStatus += '</div>';
-        
-        if (result.spqr.combined) {
-            textToUse = result.spqr.combined;
-            const successCount = [hasBase, hasRed, hasGreen || hasParity].filter(Boolean).length;
-            // Better mode labels
-            let modeLabel = layerType;
-            if (mode === 'parity') modeLabel += ' Parity';
-            else if (mode === 'hybrid') modeLabel += ' Hybrid';
-            else if (mode === 'standard') modeLabel += ' Standard';
-            html += `<div class="scan-result-item success">
-                <strong>✅ SPQR ${modeLabel} decoded! (${successCount}/${layerCount} layers)</strong><br>
-                ${layerStatus}
-                <small>${textToUse.length} characters total</small>
-            </div>`;
-        } else if (hasBase || hasRed || hasGreen) {
-            // Partial decode
-            textToUse = (result.spqr.base || '') + (result.spqr.red || '') + (result.spqr.green || '');
-            const successCount = [hasBase, hasRed, hasGreen].filter(Boolean).length;
-            const modeLabel = layerCount === 3 ? '3-layer' : '2-layer';
-            html += `<div class="scan-result-item warning">
-                <strong>⚠️  SPQR ${modeLabel} partially decoded (${successCount}/${layerCount} layers)</strong><br>
-                ${layerStatus}
-                <small>${textToUse.length} characters recovered (may be incomplete)</small>
-            </div>`;
-        } else {
-            html += `<div class="scan-result-item error">
-                <strong>❌ SPQR decode failed</strong><br>
-                ${layerStatus}
-                <small>No layers could be decoded. Try a clearer image or better lighting.</small>
-            </div>`;
-        }
-    }
-    
-    if (!result.standard && (!result.spqr || (!result.spqr.base && !result.spqr.red && !result.spqr.combined))) {
-        html += `<div class="scan-result-item error">
-            <strong>❌ No QR Code Found</strong><br>
-            Make sure the image contains a clear, readable QR code.<br>
-            <small>💡 Tip: Try better lighting or a clearer image.</small>
-        </div>`;
-    }
-    
-    // Show aggregator status if active
-    if (parityAggregator.progress) {
-        const prog = parityAggregator.progress;
-        const renderLayerSummary = (label, icon, info) => {
-            if (!info) return `<div style="margin: 4px 0; color: #666; font-family: monospace;">${icon} ${label}: awaiting data</div>`;
-            const colour = info.locked === info.total && info.total > 0 ? '#0a0' : (info.locked > 0 || info.partial > 0 ? '#d68b00' : '#666');
-            const partialText = info.partial ? ` (+${info.partial} seen)` : '';
-            return `<div style="margin: 4px 0; color: ${colour}; font-family: monospace;">
-                ${icon} ${label}: ${info.locked}/${info.total} locked${partialText}<br>
-                <span>${info.bar || ''}</span>
-            </div>`;
-        };
-        html += `<div style="margin-top: 8px; padding: 8px; background: #f0f8ff; border-left: 3px solid #4a90e2; font-size: 12px;">
-            <strong>📦 Multi-frame aggregator (${prog.chunkSize}-char chunks)</strong>
-            ${renderLayerSummary('Base', '⬛', prog.base)}
-            ${renderLayerSummary('Red', '🟥', prog.red)}
-            ${renderLayerSummary('Green/Parity', '🟩', prog.green)}
-        </div>`;
-    }
-
+	const scanResultDiv = document.getElementById('scanResult');
+	const progressPanel = document.getElementById('scan-progress');
+	
+	let html = '<h3>📱 Scan Results:</h3>';
+	let textToUse = null;
+	
+	let shouldStopCameraAfterDecode = false;
+	let shouldScrollResults = false;
+	let progressTitle = '';
+	const progressSegments = [];
+	
+	const summariseChunkCounts = (label, info) => {
+		if (!info || !Number.isFinite(info.total) || info.total <= 0) return `${label}: 0/0`;
+		return `${label}: ${info.locked}/${info.total}`;
+	};
+	
+	if (result.standard) {
+		textToUse = result.standard;
+		html += `<div class="scan-result-item success">
+			<strong>✅ Standard QR Code decoded!</strong><br>
+			<small>${result.standard.length} characters</small>
+		</div>`;
+		shouldStopCameraAfterDecode = true;
+		shouldScrollResults = true;
+		progressTitle = 'Standard QR decoded';
+		progressSegments.push('<div class="scan-progress-line">Standard QR fully decoded ✅</div>');
+	}
+	
+	if (result.spqr) {
+		const hasBase = result.spqr.base && result.spqr.base.length > 0 && !result.spqr.base.startsWith('Error:');
+		const hasRed = result.spqr.red && result.spqr.red.length > 0;
+		const hasGreen = result.spqr.green && result.spqr.green.length > 0;
+		const hasParity = result.spqr.parity || (result.spqr.green && result.spqr.green.startsWith && result.spqr.green.startsWith('SPQRv'));
+		
+		let mode = result.spqr.mode || 'unknown';
+		let layerType = result.spqr.layerType || 'SPQR';
+		let layerCount = layerType === 'BWRG' ? 2 : 3;
+		
+		if (mode === 'unknown') {
+			if (hasParity) {
+				mode = 'parity';
+				layerCount = 3;
+			} else if (hasGreen) {
+				mode = 'standard/hybrid';
+				layerCount = 3;
+			} else if (hasBase || hasRed) {
+				mode = 'BWRG';
+				layerCount = 2;
+			}
+		}
+		
+		const layerFlags = layerCount === 3
+			? [hasBase, hasRed, Boolean(hasParity) || hasGreen]
+			: [hasBase, hasRed];
+		const successCount = layerFlags.filter(Boolean).length;
+		const isFullyCombined = Boolean(result.spqr.combined) && successCount === layerCount && layerCount > 0;
+		
+		const badgeParts = [];
+		badgeParts.push(`<span class="layer-badge ${hasBase ? 'locked' : 'missing'}">⬛ Base ${hasBase ? '✓' : '…'}</span>`);
+		badgeParts.push(`<span class="layer-divider">·</span><span class="layer-badge ${hasRed ? 'locked' : 'missing'}">🟥 Red ${hasRed ? '✓' : '…'}</span>`);
+		if (layerCount === 3) {
+			if (hasParity) {
+				badgeParts.push(`<span class="layer-divider">·</span><span class="layer-badge ${hasParity ? 'locked' : 'missing'}">🟩 Parity ${hasParity ? '✓' : '…'}</span>`);
+			} else {
+				badgeParts.push(`<span class="layer-divider">·</span><span class="layer-badge ${hasGreen ? 'locked' : 'missing'}">🟩 Green ${hasGreen ? '✓' : '…'}</span>`);
+			}
+		}
+		
+		progressTitle = `Layers locked: ${successCount}/${layerCount}`;
+		progressSegments.length = 0;
+		progressSegments.push(`<div class="scan-progress-layers">${badgeParts.join('')}</div>`);
+		
+		let modeLabel = layerType;
+		if (mode === 'parity') modeLabel += ' Parity';
+		else if (mode === 'hybrid') modeLabel += ' Hybrid';
+		else if (mode === 'standard') modeLabel += ' Standard';
+		
+		progressSegments.push(`<div class="scan-progress-line">Mode: ${modeLabel}</div>`);
+		
+		if (parityAggregator.progress) {
+			const prog = parityAggregator.progress;
+			const chunkParts = [];
+			if (prog.base) chunkParts.push(summariseChunkCounts('Base', prog.base));
+			if (prog.red) chunkParts.push(summariseChunkCounts('Red', prog.red));
+			if (prog.green) chunkParts.push(summariseChunkCounts('Green/Parity', prog.green));
+			if (chunkParts.length) {
+				progressSegments.push(`<div class="scan-progress-chunks">Chunks locked · ${chunkParts.join(' · ')}</div>`);
+			}
+		}
+		
+		let layerStatus = '<div style="margin: 8px 0; font-family: monospace; font-size: 14px;">';
+		if (layerCount === 3) {
+			layerStatus += `<span style="color: ${hasBase ? '#0a0' : '#a00'}">⬛ Base ${hasBase ? '✓' : '✗'}</span> `;
+			layerStatus += `<span style="color: ${hasRed ? '#0a0' : '#a00'}">🟥 Red ${hasRed ? '✓' : '✗'}</span> `;
+			if (hasParity) {
+				layerStatus += `<span style="color: ${hasParity ? '#0a0' : '#a00'}">🟩 Parity ${hasParity ? '✓' : '✗'}</span>`;
+			} else {
+				layerStatus += `<span style="color: ${hasGreen ? '#0a0' : '#a00'}">🟩 Green ${hasGreen ? '✓' : '✗'}</span>`;
+			}
+		} else if (layerCount === 2) {
+			layerStatus += `<span style="color: ${hasBase ? '#0a0' : '#a00'}">⬛ Base ${hasBase ? '✓' : '✗'}</span> `;
+			layerStatus += `<span style="color: ${hasRed ? '#0a0' : '#a00'}">🟥 Red ${hasRed ? '✓' : '✗'}</span>`;
+		}
+		layerStatus += '</div>';
+		
+		if (result.spqr.combined) {
+			textToUse = result.spqr.combined;
+			html += `<div class="scan-result-item success">
+				<strong>✅ SPQR ${modeLabel} decoded! (${successCount}/${layerCount} layers)</strong><br>
+				${layerStatus}
+				<small>${textToUse.length} characters total</small>
+			</div>`;
+			if (isFullyCombined) {
+				shouldStopCameraAfterDecode = true;
+				shouldScrollResults = true;
+			}
+		} else if (hasBase || hasRed || hasGreen || hasParity) {
+			const partialText = (result.spqr.base || '') + (result.spqr.red || '') + (result.spqr.green || '');
+			const modeDescriptor = layerCount === 3 ? '3-layer' : '2-layer';
+			html += `<div class="scan-result-item warning">
+				<strong>⚠️  SPQR ${modeDescriptor} partially decoded (${successCount}/${layerCount} layers)</strong><br>
+				${layerStatus}
+				<small>${partialText.length} characters recovered (additional frames required)</small>
+			</div>`;
+		} else {
+			html += `<div class="scan-result-item error">
+				<strong>❌ SPQR decode failed</strong><br>
+				${layerStatus}
+				<small>No layers could be decoded. Try a clearer image or better lighting.</small>
+			</div>`;
+		}
+	}
+	
+	if (!result.standard && (!result.spqr || (!result.spqr.base && !result.spqr.red && !result.spqr.combined))) {
+		html += `<div class="scan-result-item error">
+			<strong>❌ No QR Code Found</strong><br>
+			Make sure the image contains a clear, readable QR code.<br>
+			<small>💡 Tip: Try better lighting or a clearer image.</small>
+		</div>`;
+	}
+	
+	if (parityAggregator.progress) {
+		const prog = parityAggregator.progress;
+		const renderLayerSummary = (label, icon, info) => {
+			if (!info) return `<div style="margin: 4px 0; color: #666; font-family: monospace;">${icon} ${label}: awaiting data</div>`;
+			const colour = info.locked === info.total && info.total > 0 ? '#0a0' : (info.locked > 0 || info.partial > 0 ? '#d68b00' : '#666');
+			const partialText = info.partial ? ` (+${info.partial} seen)` : '';
+			return `<div style="margin: 4px 0; color: ${colour}; font-family: monospace;">
+				${icon} ${label}: ${info.locked}/${info.total} locked${partialText}<br>
+				<span>${info.bar || ''}</span>
+			</div>`;
+		};
+		html += `<div style="margin-top: 8px; padding: 8px; background: #f0f8ff; border-left: 3px solid #4a90e2; font-size: 12px;">
+			<strong>📦 Multi-frame aggregator (${prog.chunkSize}-char chunks)</strong>
+			${renderLayerSummary('Base', '⬛', prog.base)}
+			${renderLayerSummary('Red', '🟥', prog.red)}
+			${renderLayerSummary('Green/Parity', '🟩', prog.green)}
+		</div>`;
+	}
+	
 	if (lastFrameQualityMetrics) {
 		const { contrast, sharpness, colorRatio } = lastFrameQualityMetrics;
 		let focusHint = '';
@@ -4977,17 +5144,46 @@ function displayScanResult(result) {
 			${focusHint ? `<br><em>${focusHint}</em>` : ''}
 		</div>`;
 	}
-    
-    scanResultDiv.innerHTML = html;
-    scanResultDiv.style.display = 'block';
-    
-    // Scroll to scan results after a brief delay to ensure rendering
-    setTimeout(() => smoothScrollToElement(scanResultDiv, 20), 100);
-    
-    // Auto-fill text box and generate variants
-    if (textToUse) {
-        fillTextBox(textToUse);
-    }
+	
+	if (shouldStopCameraAfterDecode && currentStream) {
+		stopCamera('✅ All layers captured – camera stopped', { resetAggregators: false });
+	}
+	
+	scanResultDiv.innerHTML = html;
+	scanResultDiv.style.display = 'block';
+	
+	let aggregatorFallbackHtml = '';
+	if (!progressSegments.length && parityAggregator.progress) {
+		const prog = parityAggregator.progress;
+		const chunkSummary = [
+			summariseChunkCounts('Base', prog.base),
+			summariseChunkCounts('Red', prog.red),
+			summariseChunkCounts('Green/Parity', prog.green)
+		];
+		aggregatorFallbackHtml = `<strong>Aggregator progress</strong><div class="scan-progress-chunks">Chunks locked · ${chunkSummary.join(' · ')}</div>`;
+	}
+	
+	if (progressPanel) {
+		if (progressTitle || progressSegments.length) {
+			const heading = progressTitle || 'Scan progress';
+			progressPanel.innerHTML = `<strong>${heading}</strong>${progressSegments.join('')}`;
+			progressPanel.classList.remove('hidden');
+		} else if (aggregatorFallbackHtml) {
+			progressPanel.innerHTML = aggregatorFallbackHtml;
+			progressPanel.classList.remove('hidden');
+		} else {
+			progressPanel.classList.add('hidden');
+			progressPanel.innerHTML = '';
+		}
+	}
+	
+	if (shouldScrollResults) {
+		setTimeout(() => smoothScrollToElement(scanResultDiv, 20), 150);
+	}
+	
+	if (shouldStopCameraAfterDecode && textToUse) {
+		fillTextBox(textToUse);
+	}
 }
 
 async function fillTextBox(text) {
@@ -5234,7 +5430,6 @@ function extractSPQRBits(baseMods, redMods) {
     console.log(`Extracted ${bits.length} bits from ${dataModules} data modules (${modules}x${modules} total)`);
     return bits;
 }
-
 // Extract color bits directly from SPQR image
 function extractSPQRColorBits(data, width, height, originX, originY, modulePx, modules) {
     const bits = [];
@@ -5295,7 +5490,6 @@ function extractSPQRColorBits(data, width, height, originX, originY, modulePx, m
     console.log(`SPQR: Extracted ${bits.length} bits from ${dataModules} color modules`);
     return bits;
 }
-
 // Decode SPQR bits as a single data stream
 function decodeSPQRBits(bits) {
     if (bits.length < 16) return null; // Need at least some data
@@ -5361,7 +5555,8 @@ function bitsToBytes(bits) {
         bytes.push(byte);
     }
     return bytes;
-    }
+}
+
 // Decode QR code bytes (assumes byte mode)
 function decodeQRBytes(bytes) {
     if (bytes.length < 4) return null;

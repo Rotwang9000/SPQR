@@ -536,6 +536,98 @@ button[type="submit"] {
     background: linear-gradient(135deg, #daa520 0%, #d2691e 100%);
 }
 
+/* Camera Preview */
+#camera-preview {
+    background: rgba(250, 248, 243, 0.92);
+    border: 3px solid #daa520;
+    border-radius: 8px;
+    padding: 18px;
+    width: 100%;
+    max-width: 720px;
+    box-shadow: 0 18px 36px rgba(44, 24, 16, 0.25);
+    position: relative;
+}
+
+#camera-preview video {
+    width: 100%;
+    height: auto;
+    display: block;
+    border: 3px solid #daa520;
+    border-radius: 6px;
+    background: #1c0f08;
+}
+
+#camera-preview canvas {
+    width: 100%;
+    height: auto;
+    border-radius: 6px;
+    border: none;
+    box-shadow: none;
+}
+
+.scan-progress {
+    margin-top: 12px;
+    background: rgba(218, 165, 32, 0.12);
+    border: 1px solid rgba(218, 165, 32, 0.45);
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: #2c1810;
+    font-family: 'Cinzel', serif;
+    letter-spacing: 0.05em;
+    transition: opacity 0.2s ease;
+}
+
+.scan-progress.hidden {
+    display: none !important;
+}
+
+.scan-progress-line {
+    display: block;
+    margin-top: 6px;
+    font-family: 'Cormorant Garamond', 'Georgia', serif;
+    font-size: 0.95rem;
+}
+
+.scan-progress-layers {
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 0.9rem;
+}
+
+.layer-badge {
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-family: 'Cinzel', serif;
+    border: 1px solid #c9b589;
+    background: #fdfbf7;
+    color: #5c4033;
+}
+
+.layer-badge.locked {
+    border-color: #0a0;
+    color: #0a0;
+}
+
+.layer-badge.missing {
+    border-color: #a00;
+    color: #a00;
+}
+
+.layer-divider {
+    align-self: center;
+    font-family: 'Cinzel', serif;
+    color: #c9b589;
+}
+
+.scan-progress-chunks {
+    margin-top: 6px;
+    font-size: 0.85rem;
+    font-family: 'Cormorant Garamond', 'Georgia', serif;
+    color: #5c4033;
+}
+
 /* Scanner Results */
 #scanResult {
     margin-top: 20px;
@@ -574,7 +666,6 @@ button[type="submit"] {
 video, canvas {
     max-width: 100%;
     border-radius: 8px;
-    border: 3px solid #daa520;
     box-shadow: 0 8px 20px rgba(0,0,0,0.3);
 }
 
@@ -605,6 +696,21 @@ video, canvas {
     #upload-area button {
         width: calc(50% - 10px);
         margin: 5px;
+    }
+
+    #camera-preview {
+        padding: 14px;
+        margin: 12px auto;
+        width: calc(100% - 20px);
+    }
+
+    #camera-preview video {
+        max-height: 60vh;
+    }
+
+    .scan-progress {
+        font-size: 0.9rem;
+        letter-spacing: 0.04em;
     }
 }
 

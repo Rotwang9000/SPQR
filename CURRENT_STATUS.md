@@ -35,6 +35,11 @@
    - These high-contrast patterns help phone autofocus systems (both phase-detect and contrast-detect) lock onto flat screens
    - Users report focus is better now
 
+6. **Camera UX Enhancements (2025-11-02)**:
+   - Camera view auto-scrolls into focus when started, but stays visible whilst layers aggregate
+   - New progress panel shows layers locked and chunk status, with responsive layout tuned for mobile devices
+   - Camera stream now stops automatically once all required layers are captured and the decoder finishes
+
 ### Current Status
 
 - Focus assistance is working well

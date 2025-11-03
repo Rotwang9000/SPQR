@@ -16,11 +16,12 @@
             <h2>📱 Read & Convert QR Codes</h2>
             <p class="note">Upload or scan any QR code to read it and auto-generate all variants</p>
             <div id="scanner-container">
-                <div id="camera-preview" style="display: none; position: relative; margin: 20px auto; width: fit-content;">
-                    <video id="video" width="640" height="480" autoplay playsinline style="display: block; max-width: 100%; border: 2px solid #333; border-radius: 8px;"></video>
-                    <canvas id="overlay-canvas" width="640" height="480" style="position: absolute; top: 0; left: 0; pointer-events: none;"></canvas>
-                    <div id="scan-status" style="position: absolute; bottom: 10px; left: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 5px; font-size: 14px; text-align: center;"></div>
-                </div>
+			<div id="camera-preview" style="display: none; position: relative; margin: 20px auto;">
+				<video id="video" width="640" height="480" autoplay playsinline></video>
+				<canvas id="overlay-canvas" width="640" height="480" style="position: absolute; top: 0; left: 0; pointer-events: none;"></canvas>
+				<div id="scan-progress" class="scan-progress hidden" aria-live="polite"></div>
+				<div id="scan-status" aria-live="polite" style="position: absolute; bottom: 10px; left: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 5px; font-size: 14px; text-align: center;"></div>
+			</div>
                 <canvas id="canvas" width="300" height="300" style="display: none;"></canvas>
                 <div id="upload-area">
                     <input type="file" id="fileInput" accept="image/*" style="display: none;">
@@ -47,7 +48,13 @@
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
     <script src="https://unpkg.com/@zxing/library@latest/umd/index.min.js"></script>
     <script src="vendor/qrcodegen.min.js"></script>
-        <script src="app.js?v=20251101e"></script>
+    <script type="module">
+        import { decodeMatrixGuessMask, decodeMatrixWithParams, matrixFromModules } from './dist/decoderCore.js';
+        window.decodeMatrixGuessMask = decodeMatrixGuessMask;
+        window.decodeMatrixWithParams = decodeMatrixWithParams;
+        window.decoderMatrixFromModules = matrixFromModules;
+    </script>
+        <script src="app.js?v=20251102a"></script>
     <script>
         // Add test runner (uses current web decoder path)
         window.testDecoder = async function() {
