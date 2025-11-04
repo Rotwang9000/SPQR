@@ -20,11 +20,13 @@ function buildFocusDecorations(width, height) {
 	const cornerSize = Math.max(stroke * 6, Math.round(minDim * 0.14));
 	const inset = Math.max(stroke * 2, Math.round(minDim * 0.035));
 	const textSize = Math.max(10, Math.round(minDim * 0.06));
-	const textY = Math.min(height - stroke * 1.5, height - inset * 0.6);
+	// Position text well outside the QR code area (below the bottom margin)
+	const textY = height + textSize * 2;
 	const tl = `M ${inset + cornerSize},${inset} L ${inset},${inset} L ${inset},${inset + cornerSize}`;
 	const tr = `M ${width - inset - cornerSize},${inset} L ${width - inset},${inset} L ${width - inset},${inset + cornerSize}`;
 	const bl = `M ${inset},${height - inset - cornerSize} L ${inset},${height - inset} L ${inset + cornerSize},${height - inset}`;
 	const br = `M ${width - inset - cornerSize},${height - inset} L ${width - inset},${height - inset} L ${width - inset},${height - inset - cornerSize}`;
+	const expandedHeight = height + textSize * 3;
 	return `
 		<g class="focus-aids" fill="none" stroke="#000" stroke-width="${stroke}" opacity="0.55">
 			<path d="${tl}" />
@@ -32,7 +34,7 @@ function buildFocusDecorations(width, height) {
 			<path d="${bl}" />
 			<path d="${br}" />
 		</g>
-		<text x="${width / 2}" y="${textY}" font-family="monospace" font-size="${textSize}" font-weight="bold" text-anchor="middle" fill="#555">SPQR</text>
+		<text x="${width / 2}" y="${textY}" font-family="monospace" font-size="${textSize}" font-weight="bold" text-anchor="middle" fill="#555" opacity="0.45">SPQR</text>
 	`;
 }
 
@@ -78,7 +80,7 @@ function stopCamera(message = '📷 Camera stopped', { resetAggregators = false 
 	
 	if (progressPanel) {
 		if (resetAggregators) {
-			progressPanel.classList.add('hidden');
+			progressPanel.style.display = 'none';
 			progressPanel.innerHTML = '';
 		}
 	}
@@ -116,7 +118,7 @@ async function startCamera() {
 		lastDecodedText = null;
 		scanPauseUntil = 0;
 		if (progressPanel) {
-			progressPanel.classList.add('hidden');
+			progressPanel.style.display = 'none';
 			progressPanel.innerHTML = '';
 		}
 		
@@ -269,12 +271,24 @@ async function generateStandardQR(text) {
 		const width = parseInt(svgEl.getAttribute('width') || '200');
 		const height = parseInt(svgEl.getAttribute('height') || '200');
 		const decorations = buildFocusDecorations(width, height);
+		// Expand viewBox to accommodate label below
+		const minDim = Math.min(width, height);
+		const textSize = Math.max(10, Math.round(minDim * 0.06));
+		const expandedHeight = height + textSize * 3;
+		svg = svg.replace(/<svg([^>]*?)viewBox="([^"]*)"/, (match, attrs, vb) => {
+			const parts = vb.split(/\s+/);
+			if (parts.length === 4) {
+				parts[3] = expandedHeight; // Expand height in viewBox
+			}
+			return `<svg${attrs}viewBox="${parts.join(' ')}"`;
+		});
+		svg = svg.replace(/<svg([^>]*?)height="([^"]*)"/, `<svg$1height="${expandedHeight}"`);
 		svg = svg.replace('</svg>', `${decorations}</svg>`);
 		tmp.innerHTML = svg;
 		svgEl = tmp.firstChild;
 		const canvas = document.createElement('canvas');
 		canvas.width = width;
-		canvas.height = height;
+		canvas.height = expandedHeight;
 		const ctx = canvas.getContext('2d');
 		const img = new Image();
 		const data = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
@@ -384,9 +398,14 @@ async function generateSpqrClient(text, options) {
 	// Helper to query a module
 	const dark = (qr, x, y) => (qr ? qr.isDark(y, x) : false);
 
-	let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+	// Calculate expanded dimensions for label
+	const minDim = Math.min(width, height);
+	const textSize = Math.max(10, Math.round(minDim * 0.06));
+	const expandedHeight = height + textSize * 3;
+	
+	let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${expandedHeight}" viewBox="0 0 ${width} ${expandedHeight}">`;
 	// White background
-	svg += `<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`;
+	svg += `<rect x="0" y="0" width="${width}" height="${expandedHeight}" fill="#ffffff"/>`;
 
 	// Draw modules
 	for (let y = 0; y < modules; y++) {
@@ -435,7 +454,7 @@ async function generateSpqrClient(text, options) {
 
 	svg += `</svg>`;
 
-	const dataUrl = await svgToPngDataUrl(svg, width, height);
+	const dataUrl = await svgToPngDataUrl(svg, width, expandedHeight);
 	return { svg, dataUrl };
 }
 
@@ -5031,7 +5050,15 @@ function displayScanResult(result) {
 		
 		let mode = result.spqr.mode || 'unknown';
 		let layerType = result.spqr.layerType || 'SPQR';
+		// If only base layer decoded and no red/green were attempted, it's likely a standard QR misdetected as SPQR
+		// Don't show layer progress for these
+		const isLikelyStandardMisdetected = hasBase && !hasRed && !hasGreen && !hasParity && 
+			result.spqr.red === undefined && result.spqr.green === undefined;
+		
 		let layerCount = layerType === 'BWRG' ? 2 : 3;
+		if (isLikelyStandardMisdetected) {
+			layerCount = 1; // Treat as monochrome
+		}
 		
 		if (mode === 'unknown') {
 			if (hasParity) {
@@ -5194,12 +5221,12 @@ function displayScanResult(result) {
 		if (progressTitle || progressSegments.length) {
 			const heading = progressTitle || 'Scan progress';
 			progressPanel.innerHTML = `<strong>${heading}</strong>${progressSegments.join('')}`;
-			progressPanel.classList.remove('hidden');
+			progressPanel.style.display = 'block';
 		} else if (aggregatorFallbackHtml) {
 			progressPanel.innerHTML = aggregatorFallbackHtml;
-			progressPanel.classList.remove('hidden');
+			progressPanel.style.display = 'block';
 		} else {
-			progressPanel.classList.add('hidden');
+			progressPanel.style.display = 'none';
 			progressPanel.innerHTML = '';
 		}
 	}
