@@ -1049,10 +1049,68 @@ function locateQRStructure(data, width, height) {
 	// The finder starts at module (0,0) of the QR grid (including 4-module quiet zone)
 	// So TL.x = originX + 3.5 * modulePx
 	// Therefore: originX = TL.x - 3.5 * modulePx
-	const originX = Math.round(TL.x - 3.5 * modulePx);
-	const originY = Math.round(TL.y - 3.5 * modulePx);
+	let originX = Math.round(TL.x - 3.5 * modulePx);
+	let originY = Math.round(TL.y - 3.5 * modulePx);
 	
-	console.log(`   Spacing: ${Math.round(avgDist)}px → ${qrModules} modules @ ${modulePx}px, origin=(${originX},${originY})`);
+	// Refine origin by scanning for the actual top-left corner of the quiet zone
+	// Look for transition from white (outside) to black (finder ring start)
+	const searchRadius = Math.round(modulePx * 2);
+	let bestOriginX = originX;
+	let bestOriginY = originY;
+	let bestScore = -Infinity;
+	
+	for (let dy = -searchRadius; dy <= searchRadius; dy++) {
+		for (let dx = -searchRadius; dx <= searchRadius; dx++) {
+			const testX = originX + dx;
+			const testY = originY + dy;
+			if (testX < 0 || testY < 0) continue;
+			
+			// Score based on: white pixels in quiet zone, black pixels in finder ring
+			let score = 0;
+			// Sample quiet zone (should be white)
+			for (let qy = 0; qy < 4; qy++) {
+				for (let qx = 0; qx < 4; qx++) {
+					const px = Math.round(testX + (qx + 0.5) * modulePx);
+					const py = Math.round(testY + (qy + 0.5) * modulePx);
+					if (px >= 0 && px < width && py >= 0 && py < height) {
+						const i = (py * width + px) * 4;
+						const r = data[i], g = data[i+1], b = data[i+2];
+						const isWhite = r > 200 && g > 200 && b > 200;
+						if (isWhite) score += 1;
+					}
+				}
+			}
+			// Sample finder ring (should be black)
+			for (let fy = 4; fy < 11; fy++) {
+				for (let fx = 4; fx < 11; fx++) {
+					// Only check the outer ring (not the colored center)
+					const inRing = (fx === 4 || fx === 10 || fy === 4 || fy === 10) ||
+					               (fx >= 5 && fx <= 9 && fy >= 5 && fy <= 9 && (fx === 5 || fx === 9 || fy === 5 || fy === 9));
+					if (inRing) {
+						const px = Math.round(testX + (fx + 0.5) * modulePx);
+						const py = Math.round(testY + (fy + 0.5) * modulePx);
+						if (px >= 0 && px < width && py >= 0 && py < height) {
+							const i = (py * width + px) * 4;
+							const r = data[i], g = data[i+1], b = data[i+2];
+							const isBlack = r < 80 && g < 80 && b < 80;
+							if (isBlack) score += 2; // Weight black ring detection more
+						}
+					}
+				}
+			}
+			
+			if (score > bestScore) {
+				bestScore = score;
+				bestOriginX = testX;
+				bestOriginY = testY;
+			}
+		}
+	}
+	
+	originX = bestOriginX;
+	originY = bestOriginY;
+	
+	console.log(`   Spacing: ${Math.round(avgDist)}px → ${qrModules} modules @ ${modulePx}px, origin=(${originX},${originY}) [refined, score=${bestScore}]`);
 	
 	return {
 		finders: [TL, TR, BL],
@@ -5114,17 +5172,20 @@ function displayScanResult(result) {
 			}
 		}
 		
-		progressTitle = `<strong style="font-size: 15px; color: #fff;">Layers: ${successCount}/${layerCount}</strong>`;
-		progressSegments.length = 0;
-		progressSegments.push(`<div style="margin-top: 6px;">${badgeParts.join('')}</div>`);
-		
+		// Build mode description for overlay
 		let modeLabel = layerType;
 		if (mode === 'parity') modeLabel += ' Parity';
 		else if (mode === 'hybrid') modeLabel += ' Hybrid';
 		else if (mode === 'standard') modeLabel += ' Standard';
 		
-		progressSegments.push(`<div style="margin-top: 6px; color: #ddd; font-size: 13px;">Mode: ${modeLabel}</div>`);
+		progressTitle = `<strong style="font-size: 16px; color: #fff;">${modeLabel}</strong>`;
+		progressSegments.length = 0;
 		
+		// Layer status with clear visual indicators
+		progressSegments.push(`<div style="margin-top: 8px; font-size: 15px;">${badgeParts.join('')}</div>`);
+		progressSegments.push(`<div style="margin-top: 4px; color: #ddd; font-size: 14px;">Locked: ${successCount} of ${layerCount} layers</div>`);
+		
+		// Block progress if multi-frame aggregation is active
 		if (parityAggregator.progress) {
 			const prog = parityAggregator.progress;
 			const chunkParts = [];
