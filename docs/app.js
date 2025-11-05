@@ -14,19 +14,21 @@ function smoothScrollToElement(element, offset = 0) {
 	});
 }
 
-function buildFocusDecorations(width, height) {
+function buildFocusDecorations(width, height, marginPx = 0) {
+	// Position corners OUTSIDE the QR code area (beyond the white margin)
 	const minDim = Math.min(width, height);
 	const stroke = Math.max(2, Math.round(minDim * 0.012));
-	const cornerSize = Math.max(stroke * 6, Math.round(minDim * 0.14));
-	const inset = Math.max(stroke * 2, Math.round(minDim * 0.035));
+	const cornerSize = Math.max(stroke * 8, Math.round(minDim * 0.08));
+	const outset = marginPx > 0 ? -marginPx * 0.5 : -Math.max(stroke * 3, Math.round(minDim * 0.02));
 	const textSize = Math.max(10, Math.round(minDim * 0.06));
-	// Position text well outside the QR code area (below the bottom margin)
 	const textY = height + textSize * 2;
-	const tl = `M ${inset + cornerSize},${inset} L ${inset},${inset} L ${inset},${inset + cornerSize}`;
-	const tr = `M ${width - inset - cornerSize},${inset} L ${width - inset},${inset} L ${width - inset},${inset + cornerSize}`;
-	const bl = `M ${inset},${height - inset - cornerSize} L ${inset},${height - inset} L ${inset + cornerSize},${height - inset}`;
-	const br = `M ${width - inset - cornerSize},${height - inset} L ${width - inset},${height - inset} L ${width - inset},${height - inset - cornerSize}`;
-	const expandedHeight = height + textSize * 3;
+	
+	// Position corners outside the QR area
+	const tl = `M ${outset + cornerSize},${outset} L ${outset},${outset} L ${outset},${outset + cornerSize}`;
+	const tr = `M ${width - outset - cornerSize},${outset} L ${width - outset},${outset} L ${width - outset},${outset + cornerSize}`;
+	const bl = `M ${outset},${height - outset - cornerSize} L ${outset},${height - outset} L ${outset + cornerSize},${height - outset}`;
+	const br = `M ${width - outset - cornerSize},${height - outset} L ${width - outset},${height - outset} L ${width - outset},${height - outset - cornerSize}`;
+	
 	return `
 		<g class="focus-aids" fill="none" stroke="#000" stroke-width="${stroke}" opacity="0.55">
 			<path d="${tl}" />
@@ -270,7 +272,9 @@ async function generateStandardQR(text) {
 		let svgEl = tmp.firstChild;
 		const width = parseInt(svgEl.getAttribute('width') || '200');
 		const height = parseInt(svgEl.getAttribute('height') || '200');
-		const decorations = buildFocusDecorations(width, height);
+		// qrcode-generator uses margin=2 modules, cell=4px
+		const marginPx = 2 * 4; // 8px margin
+		const decorations = buildFocusDecorations(width, height, marginPx);
 		// Expand viewBox to accommodate label below
 		const minDim = Math.min(width, height);
 		const textSize = Math.max(10, Math.round(minDim * 0.06));
@@ -450,7 +454,8 @@ async function generateSpqrClient(text, options) {
 	// Draw colour keys inside inner 3x3
 	drawFinderKeys(svgAdd => { svg += svgAdd; }, modules, margin, cell, colours, isEightColour);
 
-	svg += buildFocusDecorations(width, height);
+	// Add focus decorations outside the QR code margin
+	svg += buildFocusDecorations(width, height, margin * cell);
 
 	svg += `</svg>`;
 
