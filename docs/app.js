@@ -5085,26 +5085,26 @@ function displayScanResult(result) {
 		const isFullyCombined = Boolean(result.spqr.combined) && successCount === layerCount && layerCount > 0;
 		
 		const badgeParts = [];
-		badgeParts.push(`<span class="layer-badge ${hasBase ? 'locked' : 'missing'}">⬛ Base ${hasBase ? '✓' : '…'}</span>`);
-		badgeParts.push(`<span class="layer-divider">·</span><span class="layer-badge ${hasRed ? 'locked' : 'missing'}">🟥 Red ${hasRed ? '✓' : '…'}</span>`);
+		badgeParts.push(`<span style="display: inline-block; padding: 3px 8px; margin: 2px; border-radius: 4px; font-weight: 600; background: ${hasBase ? 'rgba(0,200,0,0.25)' : 'rgba(200,0,0,0.15)'}; color: ${hasBase ? '#0f0' : '#f88'}; border: 1px solid ${hasBase ? '#0f0' : '#f88'};">⬛ Base ${hasBase ? '✓' : '…'}</span>`);
+		badgeParts.push(`<span style="color: #aaa; margin: 0 4px;">·</span><span style="display: inline-block; padding: 3px 8px; margin: 2px; border-radius: 4px; font-weight: 600; background: ${hasRed ? 'rgba(0,200,0,0.25)' : 'rgba(200,0,0,0.15)'}; color: ${hasRed ? '#0f0' : '#f88'}; border: 1px solid ${hasRed ? '#0f0' : '#f88'};">🟥 Red ${hasRed ? '✓' : '…'}</span>`);
 		if (layerCount === 3) {
 			if (hasParity) {
-				badgeParts.push(`<span class="layer-divider">·</span><span class="layer-badge ${hasParity ? 'locked' : 'missing'}">🟩 Parity ${hasParity ? '✓' : '…'}</span>`);
+				badgeParts.push(`<span style="color: #aaa; margin: 0 4px;">·</span><span style="display: inline-block; padding: 3px 8px; margin: 2px; border-radius: 4px; font-weight: 600; background: ${hasParity ? 'rgba(0,200,0,0.25)' : 'rgba(200,0,0,0.15)'}; color: ${hasParity ? '#0f0' : '#f88'}; border: 1px solid ${hasParity ? '#0f0' : '#f88'};">🟩 Parity ${hasParity ? '✓' : '…'}</span>`);
 			} else {
-				badgeParts.push(`<span class="layer-divider">·</span><span class="layer-badge ${hasGreen ? 'locked' : 'missing'}">🟩 Green ${hasGreen ? '✓' : '…'}</span>`);
+				badgeParts.push(`<span style="color: #aaa; margin: 0 4px;">·</span><span style="display: inline-block; padding: 3px 8px; margin: 2px; border-radius: 4px; font-weight: 600; background: ${hasGreen ? 'rgba(0,200,0,0.25)' : 'rgba(200,0,0,0.15)'}; color: ${hasGreen ? '#0f0' : '#f88'}; border: 1px solid ${hasGreen ? '#0f0' : '#f88'};">🟩 Green ${hasGreen ? '✓' : '…'}</span>`);
 			}
 		}
 		
-		progressTitle = `Layers locked: ${successCount}/${layerCount}`;
+		progressTitle = `<strong style="font-size: 15px; color: #fff;">Layers: ${successCount}/${layerCount}</strong>`;
 		progressSegments.length = 0;
-		progressSegments.push(`<div class="scan-progress-layers">${badgeParts.join('')}</div>`);
+		progressSegments.push(`<div style="margin-top: 6px;">${badgeParts.join('')}</div>`);
 		
 		let modeLabel = layerType;
 		if (mode === 'parity') modeLabel += ' Parity';
 		else if (mode === 'hybrid') modeLabel += ' Hybrid';
 		else if (mode === 'standard') modeLabel += ' Standard';
 		
-		progressSegments.push(`<div class="scan-progress-line">Mode: ${modeLabel}</div>`);
+		progressSegments.push(`<div style="margin-top: 6px; color: #ddd; font-size: 13px;">Mode: ${modeLabel}</div>`);
 		
 		if (parityAggregator.progress) {
 			const prog = parityAggregator.progress;
@@ -5113,7 +5113,7 @@ function displayScanResult(result) {
 			if (prog.red) chunkParts.push(summariseChunkCounts('Red', prog.red));
 			if (prog.green) chunkParts.push(summariseChunkCounts('Green/Parity', prog.green));
 			if (chunkParts.length) {
-				progressSegments.push(`<div class="scan-progress-chunks">Chunks locked · ${chunkParts.join(' · ')}</div>`);
+				progressSegments.push(`<div style="margin-top: 6px; color: #aaddff; font-size: 13px; font-weight: 600;">Blocks: ${chunkParts.join(' · ')}</div>`);
 			}
 		}
 		
@@ -5190,12 +5190,13 @@ function displayScanResult(result) {
 	if (lastFrameQualityMetrics) {
 		const { contrast, sharpness, colorRatio } = lastFrameQualityMetrics;
 		let focusHint = '';
-		if (sharpness < 800) {
-			focusHint = 'Very soft focus detected — pull back slightly and try tap-to-focus.';
-		} else if (sharpness < 1500) {
-			focusHint = 'Slight blur — steady your hand or adjust the distance for sharper edges.';
-		} else if (contrast < 60) {
-			focusHint = 'Low contrast — try enabling a torch or better lighting.';
+		// Adjusted thresholds for screen scanning (screens have lower native contrast/sharpness)
+		if (sharpness < 400) {
+			focusHint = 'Very soft focus — pull back slightly and try tap-to-focus.';
+		} else if (sharpness < 800) {
+			focusHint = 'Slight blur — steady your hand or adjust distance.';
+		} else if (contrast < 40) {
+			focusHint = 'Low contrast — increase screen brightness or try better lighting.';
 		}
 		html += `<div style="margin-top: 8px; padding: 8px; background: #eef7ff; border-left: 3px solid #2d7be5; font-size: 12px;">
 			<strong>🔍 Last frame focus metrics</strong><br>
