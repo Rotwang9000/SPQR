@@ -14,29 +14,34 @@ function smoothScrollToElement(element, offset = 0) {
 	});
 }
 
-function buildFocusDecorations(width, height, marginPx = 0) {
-	// Position corners OUTSIDE the QR code area (beyond the white margin)
-	const minDim = Math.min(width, height);
-	const stroke = Math.max(2, Math.round(minDim * 0.012));
-	const cornerSize = Math.max(stroke * 8, Math.round(minDim * 0.08));
-	const outset = marginPx > 0 ? -marginPx * 0.5 : -Math.max(stroke * 3, Math.round(minDim * 0.02));
-	const textSize = Math.max(10, Math.round(minDim * 0.06));
-	const textY = height + textSize * 2;
+function buildFocusDecorations({ width, height, margin, textSize, labelY }) {
+	if (margin <= 0) return '';
 	
-	// Position corners outside the QR area
-	const tl = `M ${outset + cornerSize},${outset} L ${outset},${outset} L ${outset},${outset + cornerSize}`;
-	const tr = `M ${width - outset - cornerSize},${outset} L ${width - outset},${outset} L ${width - outset},${outset + cornerSize}`;
-	const bl = `M ${outset},${height - outset - cornerSize} L ${outset},${height - outset} L ${outset + cornerSize},${height - outset}`;
-	const br = `M ${width - outset - cornerSize},${height - outset} L ${width - outset},${height - outset} L ${width - outset},${height - outset - cornerSize}`;
+	const thickness = Math.max(3, Math.round(margin * 0.3));
+	const armLength = Math.max(thickness * 3, Math.round(margin * 1.8));
+	
+	// Draw L-shaped corners that reach from canvas edge to just outside the quiet zone
+	const paths = [];
+	
+	// Top-left: outer corner at (0,0), arms extend right and down
+	paths.push(`M 0,0 L ${armLength},0 L ${armLength},${thickness} L ${thickness},${thickness} L ${thickness},${armLength} L 0,${armLength} Z`);
+	
+	// Top-right: outer corner at (width,0), arms extend left and down
+	paths.push(`M ${width},0 L ${width - armLength},0 L ${width - armLength},${thickness} L ${width - thickness},${thickness} L ${width - thickness},${armLength} L ${width},${armLength} Z`);
+	
+	// Bottom-left: outer corner at (0,height), arms extend right and up
+	paths.push(`M 0,${height} L ${armLength},${height} L ${armLength},${height - thickness} L ${thickness},${height - thickness} L ${thickness},${height - armLength} L 0,${height - armLength} Z`);
+	
+	// Bottom-right: outer corner at (width,height), arms extend left and up
+	paths.push(`M ${width},${height} L ${width - armLength},${height} L ${width - armLength},${height - thickness} L ${width - thickness},${height - thickness} L ${width - thickness},${height - armLength} L ${width},${height - armLength} Z`);
+	
+	const textY = typeof labelY === 'number' ? labelY : height + Math.max(textSize * 1.2, margin * 0.6);
 	
 	return `
-		<g class="focus-aids" fill="none" stroke="#000" stroke-width="${stroke}" opacity="0.55">
-			<path d="${tl}" />
-			<path d="${tr}" />
-			<path d="${bl}" />
-			<path d="${br}" />
+		<g class="focus-aids" fill="#000" stroke="none" opacity="0.9">
+			${paths.map(d => `<path d="${d}" />`).join('')}
 		</g>
-		<text x="${width / 2}" y="${textY}" font-family="monospace" font-size="${textSize}" font-weight="bold" text-anchor="middle" fill="#555" opacity="0.45">SPQR</text>
+		<text x="${width / 2}" y="${textY}" font-family="monospace" font-size="${textSize}" font-weight="bold" text-anchor="middle" fill="#555" opacity="0.55">SPQR</text>
 	`;
 }
 
@@ -266,33 +271,38 @@ async function generateStandardQR(text) {
 		const qr = qrcode(0, 'L');
 		qr.addData(text);
 		qr.make();
-		let svg = qr.createSvgTag(4, 2); // module size, margin
+		// Larger module size for better visibility
+		const isMobile = window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
+		const moduleSize = isMobile ? 8 : 6;
+		let svg = qr.createSvgTag(moduleSize, 2); // module size, margin
 		const tmp = document.createElement('div');
 		tmp.innerHTML = svg;
 		let svgEl = tmp.firstChild;
 		const width = parseInt(svgEl.getAttribute('width') || '200');
 		const height = parseInt(svgEl.getAttribute('height') || '200');
-		// qrcode-generator uses margin=2 modules, cell=4px
-		const marginPx = 2 * 4; // 8px margin
-		const decorations = buildFocusDecorations(width, height, marginPx);
-		// Expand viewBox to accommodate label below
+		
+		// Calculate sizing for decorations without shrinking the QR modules
 		const minDim = Math.min(width, height);
 		const textSize = Math.max(10, Math.round(minDim * 0.06));
-		const expandedHeight = height + textSize * 3;
-		svg = svg.replace(/<svg([^>]*?)viewBox="([^"]*)"/, (match, attrs, vb) => {
-			const parts = vb.split(/\s+/);
-			if (parts.length === 4) {
-				parts[3] = expandedHeight; // Expand height in viewBox
-			}
-			return `<svg${attrs}viewBox="${parts.join(' ')}"`;
-		});
-		svg = svg.replace(/<svg([^>]*?)height="([^"]*)"/, `<svg$1height="${expandedHeight}"`);
-		svg = svg.replace('</svg>', `${decorations}</svg>`);
+		const labelHeight = Math.round(textSize * 2.2);
+		const totalHeight = height + labelHeight;
+		const marginPx = 2 * moduleSize; // qrcode-generator margin=2
+		
+		const innerContent = svg.replace(/<svg[^>]*>/, '').replace(/<\/svg>/, '');
+		// No corner markers for standard monochrome QR codes
+		svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalHeight}" viewBox="0 0 ${width} ${totalHeight}">
+			<rect x="0" y="0" width="${width}" height="${totalHeight}" fill="#ffffff"/>
+			<g>
+				${innerContent}
+			</g>
+			<text x="${width / 2}" y="${height + Math.max(textSize * 1.1, labelHeight * 0.55)}" font-family="monospace" font-size="${textSize}" font-weight="bold" text-anchor="middle" fill="#555" opacity="0.55">Standard QR</text>
+		</svg>`;
+		
 		tmp.innerHTML = svg;
 		svgEl = tmp.firstChild;
 		const canvas = document.createElement('canvas');
 		canvas.width = width;
-		canvas.height = expandedHeight;
+		canvas.height = totalHeight;
 		const ctx = canvas.getContext('2d');
 		const img = new Image();
 		const data = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
@@ -391,10 +401,11 @@ async function generateSpqrClient(text, options) {
 	const modules = baseQr.getModuleCount();
 	const margin = 4;
 
-	// Use fixed module sizes for reliable decoding
-	// BWRG (2-layer): 5px per module
-	// CMYRGB (3-layer): 6px per module
-	const cell = isEightColour ? 6 : 5;
+	// Use larger module sizes for better visibility and scanning
+	// Responsive sizing based on viewport
+	const baseSize = isEightColour ? 10 : 9;
+	const isMobile = window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
+	const cell = isMobile ? baseSize + 2 : baseSize; // Slightly larger on mobile
 	const totalModules = modules + 2 * margin;
 	const width = totalModules * cell;
 	const height = width;
@@ -402,14 +413,15 @@ async function generateSpqrClient(text, options) {
 	// Helper to query a module
 	const dark = (qr, x, y) => (qr ? qr.isDark(y, x) : false);
 
-	// Calculate expanded dimensions for label
-	const minDim = Math.min(width, height);
+	// Calculate sizing for decorations and label while keeping QR footprint unchanged
+	const minDim = modules * cell;
 	const textSize = Math.max(10, Math.round(minDim * 0.06));
-	const expandedHeight = height + textSize * 3;
-	
-	let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${expandedHeight}" viewBox="0 0 ${width} ${expandedHeight}">`;
-	// White background
-	svg += `<rect x="0" y="0" width="${width}" height="${expandedHeight}" fill="#ffffff"/>`;
+	const labelHeight = Math.round(textSize * 2.2);
+	const totalHeight = height + labelHeight;
+	const marginPx = margin * cell;
+
+	let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalHeight}" viewBox="0 0 ${width} ${totalHeight}" style="overflow: visible">`;
+	svg += `<rect x="0" y="0" width="${width}" height="${totalHeight}" fill="#ffffff"/>`;
 
 	// Draw modules
 	for (let y = 0; y < modules; y++) {
@@ -425,41 +437,79 @@ async function generateSpqrClient(text, options) {
 			// CMYRGB: combine base (bit2), green (bit1), red (bit0)
 			const gBit = greenQr ? (dark(greenQr, x, y) ? 1 : 0) : 0;
 			const code = (b << 2) | (gBit << 1) | r; // 0..7
-			// Map CMY code to palette index [W,R,G,Y,K,M,C,B]
-			// code: 0=W, 1=Y, 2=M, 3=R, 4=C, 5=G, 6=B, 7=K
 			const idxMap = [0, 3, 5, 1, 6, 2, 7, 4];
 			colour = colours[idxMap[code]] || '#000000';
+		} else {
+			if (b && r) {
+				colour = colours[2];
+			} else if (b && !r) {
+				colour = colours[3];
+			} else if (!b && r) {
+				colour = colours[1];
 			} else {
-				// 4-colour BWRG mapping using two layers (base, red); green = overlap
-				if (b && r) {
-					colour = colours[2]; // green (overlap)
-				} else if (b && !r) {
-					colour = colours[3]; // black
-				} else if (!b && r) {
-					colour = colours[1]; // red
-				} else {
-					colour = colours[0]; // white
-				}
+				colour = colours[0];
 			}
-			if (colour === '#ffffff') continue;
-			const px = (x + margin) * cell;
-			const py = (y + margin) * cell;
-			svg += `<rect x="${px}" y="${py}" width="${cell}" height="${cell}" fill="${colour}"/>`;
+		}
+		if (colour === '#ffffff') continue;
+		const px = (x + margin) * cell;
+		const py = (y + margin) * cell;
+		svg += `<rect x="${px}" y="${py}" width="${cell}" height="${cell}" fill="${colour}"/>`;
 		}
 	}
 
-	// Draw black finder rings to ensure readability
-	drawFinder(svgAdd => { svg += svgAdd; }, modules, margin, cell);
+	const addFinderAt = (gx, gy) => {
+		svg += `<rect x="${(gx+margin)*cell}" y="${(gy+margin)*cell}" width="${7*cell}" height="${cell}" fill="#000000"/>`;
+		svg += `<rect x="${(gx+margin)*cell}" y="${(gy+margin+6)*cell}" width="${7*cell}" height="${cell}" fill="#000000"/>`;
+		svg += `<rect x="${(gx+margin)*cell}" y="${(gy+margin+1)*cell}" width="${cell}" height="${5*cell}" fill="#000000"/>`;
+		svg += `<rect x="${(gx+margin+6)*cell}" y="${(gy+margin+1)*cell}" width="${cell}" height="${5*cell}" fill="#000000"/>`;
+		svg += `<rect x="${(gx+margin+2)*cell}" y="${(gy+margin+2)*cell}" width="${3*cell}" height="${3*cell}" fill="#000000"/>`;
+	};
+	addFinderAt(0, 0);
+	addFinderAt(modules - 7, 0);
+	addFinderAt(0, modules - 7);
 
-	// Draw colour keys inside inner 3x3
-	drawFinderKeys(svgAdd => { svg += svgAdd; }, modules, margin, cell, colours, isEightColour);
+	const addFinderKey = (gx, gy, colourOrPair) => {
+		const x0 = (gx + 2 + margin) * cell;
+		const y0 = (gy + 2 + margin) * cell;
+		if (Array.isArray(colourOrPair)) {
+			if (colourOrPair.length === 4) {
+				const quadSize = cell * 1.5;
+				svg += `<rect x="${x0}" y="${y0}" width="${quadSize}" height="${quadSize}" fill="${colourOrPair[0]}"/>`;
+				svg += `<rect x="${x0+quadSize}" y="${y0}" width="${quadSize}" height="${quadSize}" fill="${colourOrPair[1]}"/>`;
+				svg += `<rect x="${x0}" y="${y0+quadSize}" width="${quadSize}" height="${quadSize}" fill="${colourOrPair[2]}"/>`;
+				svg += `<rect x="${x0+quadSize}" y="${y0+quadSize}" width="${quadSize}" height="${quadSize}" fill="${colourOrPair[3]}"/>`;
+			} else {
+				const c1 = colourOrPair[0], c2 = colourOrPair[1];
+				svg += `<rect x="${x0}" y="${y0}" width="${cell*1.5}" height="${cell*1.5}" fill="${c1}"/>`;
+				svg += `<rect x="${x0+cell*1.5}" y="${y0}" width="${cell*1.5}" height="${cell*1.5}" fill="${c2}"/>`;
+				svg += `<rect x="${x0}" y="${y0+cell*1.5}" width="${cell*1.5}" height="${cell*1.5}" fill="${c2}"/>`;
+				svg += `<rect x="${x0+cell*1.5}" y="${y0+cell*1.5}" width="${cell*1.5}" height="${cell*1.5}" fill="${c1}"/>`;
+			}
+		} else {
+			svg += `<rect x="${x0}" y="${y0}" width="${cell*3}" height="${cell*3}" fill="${colourOrPair}"/>`;
+		}
+	};
+	if (isEightColour) {
+		addFinderKey(0, 0, [colours[0], colours[1], colours[2], colours[3]]);
+		addFinderKey(modules - 7, 0, [colours[4], colours[5], colours[6], colours[7]]);
+		addFinderKey(0, modules - 7, [colours[1], colours[6]]);
+	} else {
+		addFinderKey(0, 0, colours[3]);
+		addFinderKey(modules - 7, 0, colours[3]);
+		addFinderKey(0, modules - 7, colours[3]);
+	}
 
-	// Add focus decorations outside the QR code margin
-	svg += buildFocusDecorations(width, height, margin * cell);
+	svg += buildFocusDecorations({
+		width,
+		height,
+		margin: marginPx,
+		textSize,
+		labelY: height + Math.max(textSize * 1.1, labelHeight * 0.55)
+	});
 
 	svg += `</svg>`;
 
-	const dataUrl = await svgToPngDataUrl(svg, width, expandedHeight);
+	const dataUrl = await svgToPngDataUrl(svg, width, totalHeight);
 	return { svg, dataUrl };
 }
 
@@ -839,6 +889,130 @@ function estimateModulePx(width, height, mask) {
 	modulePx = Math.max(3, Math.min(20, modulePx|0));
 	return modulePx || null;
 }
+function detectCornerMarkers(data, width, height) {
+	// Detect L-shaped corner markers that extend from canvas edges
+	// Looking for thick black L-brackets at all four corners
+	const markers = [];
+	const minDim = Math.min(width, height);
+	const searchDepth = Math.min(Math.round(minDim * 0.15), 60); // Search inward from edges
+	
+	const isBlack = (x, y) => {
+		if (x < 0 || y < 0 || x >= width || y >= height) return false;
+		const i = (y * width + x) * 4;
+		const r = data[i], g = data[i+1], b = data[i+2];
+		return r < 80 && g < 80 && b < 80;
+	};
+	
+	// Scan for L-bracket: start from exact corner, trace both arms
+	const scanCorner = (cx, cy, xDir, yDir, cornerType) => {
+		// cx, cy = corner position (0 or width/height)
+		// xDir, yDir = direction to scan inward (+1 or -1)
+		
+		// Check if corner pixel is black
+		const startX = cx === 0 ? 0 : width - 1;
+		const startY = cy === 0 ? 0 : height - 1;
+		if (!isBlack(startX, startY)) return null;
+		
+		// Trace horizontal arm from corner
+		let hArmLen = 0;
+		for (let d = 1; d < searchDepth; d++) {
+			const x = cx + xDir * d;
+			if (x < 0 || x >= width) break;
+			if (isBlack(x, startY)) hArmLen++;
+			else break;
+		}
+		
+		// Trace vertical arm from corner
+		let vArmLen = 0;
+		for (let d = 1; d < searchDepth; d++) {
+			const y = cy + yDir * d;
+			if (y < 0 || y >= height) break;
+			if (isBlack(startX, y)) vArmLen++;
+			else break;
+		}
+		
+		// Valid L-bracket needs both arms with reasonable length
+		const minArmLen = Math.max(5, Math.round(minDim * 0.02));
+		if (hArmLen >= minArmLen && vArmLen >= minArmLen) {
+			return {
+				x: startX,
+				y: startY,
+				score: hArmLen + vArmLen,
+				armH: hArmLen,
+				armV: vArmLen,
+				type: cornerType
+			};
+		}
+		return null;
+	};
+	
+	// Scan all four corners from canvas edges
+	const tl = scanCorner(0, 0, 1, 1, 'TL');
+	const tr = scanCorner(width, 0, -1, 1, 'TR');
+	const bl = scanCorner(0, height, 1, -1, 'BL');
+	const br = scanCorner(width, height, -1, -1, 'BR');
+	
+	if (tl) markers.push(tl);
+	if (tr) markers.push(tr);
+	if (bl) markers.push(bl);
+	if (br) markers.push(br);
+	
+	return markers;
+}
+
+function gridFromCornerMarkers(markers, width, height) {
+	// Build a grid estimate from detected corner markers
+	if (markers.length < 3) return null;
+	
+	// Find TL, TR, BL markers
+	const tl = markers.find(m => m.type === 'TL');
+	const tr = markers.find(m => m.type === 'TR');
+	const bl = markers.find(m => m.type === 'BL');
+	
+	if (!tl || !tr || !bl) return null;
+	
+	// Calculate dimensions from marker positions
+	const widthPx = tr.x - tl.x;
+	const heightPx = bl.y - tl.y;
+	const avgSize = (widthPx + heightPx) / 2;
+	
+	// Estimate module count and size
+	// Markers are typically outside a 4-module margin, so QR is about 85-90% of marker spacing
+	const estimatedQRSize = avgSize * 0.87;
+	
+	// Try common QR sizes
+	const possibleVersions = [21, 25, 29, 33, 37, 41, 45, 49, 53, 57];
+	let bestVersion = 21;
+	let bestDiff = Infinity;
+	
+	for (const v of possibleVersions) {
+		const modulePx = estimatedQRSize / v;
+		if (modulePx >= 3 && modulePx <= 20) { // Reasonable module sizes
+			const diff = Math.abs(avgSize - v * modulePx);
+			if (diff < bestDiff) {
+				bestDiff = diff;
+				bestVersion = v;
+			}
+		}
+	}
+	
+	const modulePx = estimatedQRSize / bestVersion;
+	const marginPx = (avgSize - bestVersion * modulePx) / 2;
+	
+	return {
+		finders: [
+			{ x: tl.x + marginPx + 3.5 * modulePx, y: tl.y + marginPx + 3.5 * modulePx },
+			{ x: tr.x - marginPx - 3.5 * modulePx, y: tr.y + marginPx + 3.5 * modulePx },
+			{ x: bl.x + marginPx + 3.5 * modulePx, y: bl.y - marginPx - 3.5 * modulePx }
+		],
+		modulePx,
+		qrModules: bestVersion,
+		originX: Math.round(tl.x + marginPx),
+		originY: Math.round(tl.y + marginPx),
+		detectionMethod: 'corner-markers'
+	};
+}
+
 function estimateGrid(mask, width, height) {
 	const modulePx = estimateModulePx(width, height, mask) || Math.max(3, Math.min(20, Math.round(width/29)));
 	let minX = width, minY = height, maxX = 0, maxY = 0;
@@ -867,6 +1041,17 @@ function estimateGrid(mask, width, height) {
 // Locate QR structure directly from colored SPQR image
 function locateQRStructure(data, width, height) {
     console.log(`locateQRStructure: ${width}x${height} image`);
+	
+	// First, try to detect L-shaped corner markers if present (from our generated codes)
+	const cornerMarkers = detectCornerMarkers(data, width, height);
+	if (cornerMarkers && cornerMarkers.length >= 3) {
+		console.log(`   📐 Detected ${cornerMarkers.length} corner markers, using for grid estimation`);
+		const grid = gridFromCornerMarkers(cornerMarkers, width, height);
+		if (grid) {
+			console.log(`   ✨ Grid from corner markers: ${grid.qrModules}×${grid.qrModules}, ${grid.modulePx}px/module, origin=(${grid.originX},${grid.originY})`);
+			return grid;
+		}
+	}
 	
 	// Brightness-based classification for finder detection
 	// ONLY consider truly BLACK pixels as "dark" for finder detection
@@ -2405,26 +2590,33 @@ function drawDetectionBox(ctx, location, color = '#00ff00') {
 }
 
 function drawGridRect(ctx, x, y, w, h, color = '#ff9900') {
+	// Draw detection box with thick visible corners
 	ctx.strokeStyle = color;
 	ctx.lineWidth = 4;
 	ctx.strokeRect(Math.max(0,x), Math.max(0,y), Math.max(0,w), Math.max(0,h));
 	
-	// Draw corner markers to show exact detection points
-	const cornerSize = 12;
+	// Draw thick L-shaped corner markers
+	const cornerLen = 20;
+	const thickness = 6;
 	ctx.fillStyle = color;
-	ctx.globalAlpha = 0.7;
-	// TL
-	ctx.fillRect(x, y, cornerSize, 4);
-	ctx.fillRect(x, y, 4, cornerSize);
-	// TR
-	ctx.fillRect(x + w - cornerSize, y, cornerSize, 4);
-	ctx.fillRect(x + w - 4, y, 4, cornerSize);
-	// BL
-	ctx.fillRect(x, y + h - 4, cornerSize, 4);
-	ctx.fillRect(x, y + h - cornerSize, 4, cornerSize);
-	// BR
-	ctx.fillRect(x + w - cornerSize, y + h - 4, cornerSize, 4);
-	ctx.fillRect(x + w - 4, y + h - cornerSize, 4, cornerSize);
+	ctx.globalAlpha = 0.9;
+	
+	// TL - L pointing down-right
+	ctx.fillRect(x, y, cornerLen, thickness); // Horizontal
+	ctx.fillRect(x, y, thickness, cornerLen); // Vertical
+	
+	// TR - L pointing down-left
+	ctx.fillRect(x + w - cornerLen, y, cornerLen, thickness); // Horizontal
+	ctx.fillRect(x + w - thickness, y, thickness, cornerLen); // Vertical
+	
+	// BL - L pointing up-right
+	ctx.fillRect(x, y + h - thickness, cornerLen, thickness); // Horizontal
+	ctx.fillRect(x, y + h - cornerLen, thickness, cornerLen); // Vertical
+	
+	// BR - L pointing up-left
+	ctx.fillRect(x + w - cornerLen, y + h - thickness, cornerLen, thickness); // Horizontal
+	ctx.fillRect(x + w - thickness, y + h - cornerLen, thickness, cornerLen); // Vertical
+	
 	ctx.globalAlpha = 1.0;
 }
 // Camera controls: focus/zoom/torch and tap-to-focus

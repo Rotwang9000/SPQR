@@ -434,6 +434,9 @@ button[type="submit"] {
     margin-bottom: 25px;
     border: 2px solid #c9b589;
     transition: all 0.3s ease;
+    max-width: 600px;
+    margin-left: auto;
+    margin-right: auto;
 }
 
 .qr-variant:hover {
@@ -458,7 +461,8 @@ button[type="submit"] {
 }
 
 .qr-variant svg {
-    max-width: 200px;
+    max-width: 100%;
+    width: 100%;
     height: auto;
     display: block;
     margin: 20px auto;
@@ -466,6 +470,20 @@ button[type="submit"] {
     border-radius: 10px;
     padding: 10px;
     background: white;
+}
+
+/* Responsive QR sizing */
+@media (min-width: 768px) {
+    .qr-variant svg {
+        max-width: 450px;
+    }
+}
+
+@media (max-width: 767px) {
+    .qr-variant svg {
+        max-width: 95vw;
+        padding: 6px;
+    }
 }
 
 /* Download Links */

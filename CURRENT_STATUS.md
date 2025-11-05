@@ -4,6 +4,14 @@
 
 ### Recent Changes
 
+1. **Responsive Large QR Codes with Corner Markers (2025-11-03o)**:
+   - **Much larger QR codes**: Desktop uses 9-10px per module (was 5-6px), mobile uses 11-12px for optimal scanning.
+   - **Responsive display**: QR codes now fill their containers (max 450px desktop, 95vw mobile) with proper aspect ratio maintained.
+   - **L-shaped corner brackets** on SPQR codes extend to canvas edges, can touch any background (30% thickness, 1.8× quiet-zone arms).
+   - **Standard QR codes remain plain** (no corners) for spec compliance, labelled "Standard QR".
+   - **Enhanced corner detection**: `detectCornerMarkers` traces from exact canvas corners, `locateQRStructure` prioritises this before finder patterns.
+   - Centered variant cards (max 600px) create clean, scannable presentation on all devices.
+
 1. **Improved Layer Detection (2025-11-01a)**:
    - Made CMYRGB detection more aggressive: now tries CMYRGB first if ≥2 distinct colours detected in finder center (was ≥3)
    - Falls back to BWRG if CMYRGB decode fails, preventing misidentification
