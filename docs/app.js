@@ -1623,7 +1623,10 @@ function attemptBlockReconstruction(layerName, blockMap, chunkSize = 64) {
     return null;
 }
 function updateBlockAggregatorWithSpqr(spqrObj) {
-    if (!spqrObj || typeof spqrObj !== 'object') return null;
+    if (!spqrObj || typeof spqrObj !== 'object') {
+        console.log(`   ⚠️ updateBlockAggregator: no spqrObj`);
+        return null;
+    }
 
     const maybeMeta = spqrObj.meta || {};
     const proposedChunkSize = maybeMeta.chunkSize || (spqrObj.parityInfo && spqrObj.parityInfo.chunkSize);
@@ -1638,13 +1641,20 @@ function updateBlockAggregatorWithSpqr(spqrObj) {
 
     const chunkSize = parityAggregator.chunkSize;
 
+    // Log incoming data
+    console.log(`   📦 Block aggregator input: base=${spqrObj.base ? spqrObj.base.length + 'ch' : 'null'}, red=${spqrObj.red ? spqrObj.red.length + 'ch' : 'null'}, green=${spqrObj.green ? spqrObj.green.length + 'ch' : 'null'}, chunkSize=${chunkSize}`);
+
     const updateLayer = (layerKey, text, map) => {
-        if (!text || typeof text !== 'string' || text.length === 0) return false;
+        if (!text || typeof text !== 'string' || text.length === 0) {
+            console.log(`   ⚠️ ${layerKey}: no text to aggregate`);
+            return false;
+        }
         if (!parityAggregator[layerKey] || text.length >= parityAggregator[layerKey].length) {
             parityAggregator[layerKey] = text;
         }
         const totalChunks = Math.max(1, Math.ceil(text.length / chunkSize));
         parityAggregator.expected[layerKey] = Math.max(parityAggregator.expected[layerKey] || 0, totalChunks);
+        console.log(`   📊 ${layerKey}: ${text.length}ch → ${totalChunks} chunks`);
         let changed = false;
         for (let idx = 0; idx < totalChunks; idx++) {
             const start = idx * chunkSize;
@@ -1656,6 +1666,7 @@ function updateBlockAggregatorWithSpqr(spqrObj) {
             if (!existing) {
                 map.set(idx, { blockIdx: idx, data: chunkText, signature, confirmations: 1, locked: false, lastSeen: Date.now() });
                 changed = true;
+                console.log(`   ✨ ${layerKey}[${idx}]: NEW (${chunkText.length}ch)`);
                 continue;
             }
             if (existing.signature === signature) {
@@ -1664,6 +1675,7 @@ function updateBlockAggregatorWithSpqr(spqrObj) {
                 if (!existing.locked && existing.confirmations >= 2) {
                     existing.locked = true;
                     changed = true;
+                    console.log(`   🔒 ${layerKey}[${idx}]: LOCKED (confirmations=${existing.confirmations})`);
                 }
             } else {
                 if (!existing.locked || chunkText.length > existing.data.length) {
@@ -1673,6 +1685,7 @@ function updateBlockAggregatorWithSpqr(spqrObj) {
                     existing.locked = false;
                     existing.lastSeen = Date.now();
                     changed = true;
+                    console.log(`   🔄 ${layerKey}[${idx}]: UPDATED (was ${existing.data.length}ch, now ${chunkText.length}ch)`);
                 }
             }
         }
@@ -1713,28 +1726,34 @@ function buildAggregatorProgressSnapshot() {
     const chunkSize = parityAggregator.chunkSize;
     const maxDisplay = 24;
     const summarise = (map, expectedCount) => {
-        const total = Math.max(expectedCount || 0, map.size);
-        if (total === 0) return null;
+        // Use the larger of expected count or actual map size
+        const actualSize = map ? map.size : 0;
+        const total = Math.max(expectedCount || 0, actualSize);
+        if (total === 0 && actualSize === 0) return null; // No data at all
+        
         let bar = '';
         let locked = 0;
         let partial = 0;
-        for (let idx = 0; idx < total; idx++) {
-            const entry = map.get(idx);
-            let symbol = '⬛';
+        
+        // Iterate through all expected blocks
+        for (let idx = 0; idx < Math.max(total, actualSize); idx++) {
+            const entry = map ? map.get(idx) : null;
+            let symbol = '⬛'; // Empty/missing block
             if (entry) {
                 if (entry.locked) {
-                    symbol = '🟩';
+                    symbol = '🟩'; // Locked block
                     locked++;
                 } else if (entry.confirmations && entry.confirmations > 0) {
-                    symbol = '🟨';
+                    symbol = '🟨'; // Partial/seen block
                     partial++;
                 }
             }
             if (idx < maxDisplay) bar += symbol;
         }
-        if (total > maxDisplay) bar += '…';
+        if (Math.max(total, actualSize) > maxDisplay) bar += '…';
+        
         return {
-            total,
+            total: Math.max(total, actualSize),
             locked,
             partial,
             bar
@@ -5109,9 +5128,10 @@ function displayScanResult(result) {
 		if (parityAggregator.progress) {
 			const prog = parityAggregator.progress;
 			const chunkParts = [];
-			if (prog.base) chunkParts.push(summariseChunkCounts('Base', prog.base));
-			if (prog.red) chunkParts.push(summariseChunkCounts('Red', prog.red));
-			if (prog.green) chunkParts.push(summariseChunkCounts('Green/Parity', prog.green));
+			// Always show progress for all layers if any data exists
+			if (prog.base || parityAggregator.expected.base) chunkParts.push(summariseChunkCounts('⬛', prog.base));
+			if (prog.red || parityAggregator.expected.red) chunkParts.push(summariseChunkCounts('🟥', prog.red));
+			if (prog.green || parityAggregator.expected.green) chunkParts.push(summariseChunkCounts('🟩', prog.green));
 			if (chunkParts.length) {
 				progressSegments.push(`<div style="margin-top: 6px; color: #aaddff; font-size: 13px; font-weight: 600;">Blocks: ${chunkParts.join(' · ')}</div>`);
 			}
