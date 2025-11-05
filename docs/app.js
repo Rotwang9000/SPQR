@@ -779,10 +779,11 @@ function drawFinderKeys(append, modules, margin, cell, colours, isEightColour) {
 		fillInner(modules-7, 0, [colours[4], colours[5], colours[6], colours[7]]);  // TR: black, magenta, cyan, blue
 		fillInner(0, modules-7, [colours[1], colours[6]]);  // BL: red/cyan checker for redundancy
 	} else {
-		// TL red, TR green, BL black
-		fillInner(0,0,colours[1]);
-		fillInner(modules-7,0,colours[2]);
-		fillInner(0,modules-7,colours[3]);
+		// BWRG: Use black for all finder centers for better detection stability
+		// This keeps the standard QR finder pattern intact
+		fillInner(0,0,colours[3]); // TL: black
+		fillInner(modules-7,0,colours[3]); // TR: black
+		fillInner(0,modules-7,colours[3]); // BL: black
 	}
 }
 
@@ -1040,10 +1041,14 @@ function locateQRStructure(data, width, height) {
 	let qrModules = Math.round(avgDist / modulePx) + 7;
 	
 	// Round to valid QR version: 21, 25, 29, 33, ... (4n + 17 where n=1,2,3...)
-	qrModules = Math.max(21, Math.round((qrModules - 17) / 4) * 4 + 17);
+	// Use ceiling instead of rounding to avoid cutting off modules
+	const version = Math.ceil((qrModules - 17) / 4);
+	qrModules = Math.max(21, version * 4 + 17);
 	
 	// Recalculate modulePx based on actual QR size
-	modulePx = Math.round(avgDist / (qrModules - 7));
+	modulePx = avgDist / (qrModules - 7); // Use float for more accuracy
+	
+	console.log(`   Size calculation: avgDist=${avgDist.toFixed(1)}px, initial guess=${Math.round(avgDist / modulePx) + 7} modules, rounded to version ${version} = ${qrModules} modules`);
 	
 	// Origin calculation: TL finder center is at module position (3.5, 3.5) within the 7x7 finder
 	// The finder starts at module (0,0) of the QR grid (including 4-module quiet zone)
@@ -2401,8 +2406,26 @@ function drawDetectionBox(ctx, location, color = '#00ff00') {
 
 function drawGridRect(ctx, x, y, w, h, color = '#ff9900') {
 	ctx.strokeStyle = color;
-	ctx.lineWidth = 3;
+	ctx.lineWidth = 4;
 	ctx.strokeRect(Math.max(0,x), Math.max(0,y), Math.max(0,w), Math.max(0,h));
+	
+	// Draw corner markers to show exact detection points
+	const cornerSize = 12;
+	ctx.fillStyle = color;
+	ctx.globalAlpha = 0.7;
+	// TL
+	ctx.fillRect(x, y, cornerSize, 4);
+	ctx.fillRect(x, y, 4, cornerSize);
+	// TR
+	ctx.fillRect(x + w - cornerSize, y, cornerSize, 4);
+	ctx.fillRect(x + w - 4, y, 4, cornerSize);
+	// BL
+	ctx.fillRect(x, y + h - 4, cornerSize, 4);
+	ctx.fillRect(x, y + h - cornerSize, 4, cornerSize);
+	// BR
+	ctx.fillRect(x + w - cornerSize, y + h - 4, cornerSize, 4);
+	ctx.fillRect(x + w - 4, y + h - cornerSize, 4, cornerSize);
+	ctx.globalAlpha = 1.0;
 }
 // Camera controls: focus/zoom/torch and tap-to-focus
 function initCameraControls(stream, video) {
