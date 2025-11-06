@@ -969,26 +969,41 @@ function gridFromCornerMarkers(markers, width, height) {
 	const tr = markers.find(m => m.type === 'TR');
 	const bl = markers.find(m => m.type === 'BL');
 	
-	if (!tl || !tr || !bl) return null;
+	if (!tl || !tr || !bl) {
+		console.log(`   ⚠️ Incomplete corner markers: TL=${!!tl}, TR=${!!tr}, BL=${!!bl}`);
+		return null;
+	}
+	
+	console.log(`   📐 Corner markers found: TL=(${tl.x},${tl.y}) TR=(${tr.x},${tr.y}) BL=(${bl.x},${bl.y})`);
+	console.log(`   📏 Arm lengths: TL H=${tl.armH}/V=${tl.armV}, TR H=${tr.armH}/V=${tr.armV}, BL H=${bl.armH}/V=${bl.armV}`);
 	
 	// Calculate dimensions from marker positions
+	// Markers are AT the canvas edge, so full width/height equals total canvas size
 	const widthPx = tr.x - tl.x;
 	const heightPx = bl.y - tl.y;
 	const avgSize = (widthPx + heightPx) / 2;
 	
-	// Estimate module count and size
-	// Markers are typically outside a 4-module margin, so QR is about 85-90% of marker spacing
-	const estimatedQRSize = avgSize * 0.87;
+	console.log(`   📦 Canvas size from markers: ${widthPx}×${heightPx}px (avg ${avgSize.toFixed(1)}px)`);
+	
+	// Use arm lengths to estimate margin
+	// Arms extend ~1.8× margin inward, and margin is typically 4 modules
+	const avgArmLen = (tl.armH + tl.armV + tr.armH + tr.armV + bl.armH + bl.armV) / 6;
+	const estimatedMarginPx = avgArmLen / 1.8;
+	const estimatedQRSize = avgSize - 2 * estimatedMarginPx;
+	
+	console.log(`   📊 Estimated margin: ${estimatedMarginPx.toFixed(1)}px (from arm length ${avgArmLen.toFixed(1)}px)`);
+	console.log(`   📐 Estimated QR size: ${estimatedQRSize.toFixed(1)}px`);
 	
 	// Try common QR sizes
-	const possibleVersions = [21, 25, 29, 33, 37, 41, 45, 49, 53, 57];
+	const possibleVersions = [21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 73];
 	let bestVersion = 21;
 	let bestDiff = Infinity;
 	
 	for (const v of possibleVersions) {
 		const modulePx = estimatedQRSize / v;
 		if (modulePx >= 3 && modulePx <= 20) { // Reasonable module sizes
-			const diff = Math.abs(avgSize - v * modulePx);
+			const totalSize = v * modulePx + 2 * (modulePx * 4); // QR + margin
+			const diff = Math.abs(avgSize - totalSize);
 			if (diff < bestDiff) {
 				bestDiff = diff;
 				bestVersion = v;
@@ -997,18 +1012,24 @@ function gridFromCornerMarkers(markers, width, height) {
 	}
 	
 	const modulePx = estimatedQRSize / bestVersion;
-	const marginPx = (avgSize - bestVersion * modulePx) / 2;
+	const marginModules = 4;
+	const marginPx = modulePx * marginModules;
+	const originX = Math.round(marginPx);
+	const originY = Math.round(marginPx);
+	
+	console.log(`   ✅ Best match: Version ${bestVersion} (${modulePx.toFixed(2)}px/module, ${marginModules}-module margin)`);
+	console.log(`   📍 Grid origin: (${originX},${originY})`);
 	
 	return {
 		finders: [
-			{ x: tl.x + marginPx + 3.5 * modulePx, y: tl.y + marginPx + 3.5 * modulePx },
-			{ x: tr.x - marginPx - 3.5 * modulePx, y: tr.y + marginPx + 3.5 * modulePx },
-			{ x: bl.x + marginPx + 3.5 * modulePx, y: bl.y - marginPx - 3.5 * modulePx }
+			{ x: originX + 3.5 * modulePx, y: originY + 3.5 * modulePx },
+			{ x: width - marginPx - 3.5 * modulePx, y: originY + 3.5 * modulePx },
+			{ x: originX + 3.5 * modulePx, y: height - marginPx - 3.5 * modulePx }
 		],
 		modulePx,
 		qrModules: bestVersion,
-		originX: Math.round(tl.x + marginPx),
-		originY: Math.round(tl.y + marginPx),
+		originX,
+		originY,
 		detectionMethod: 'corner-markers'
 	};
 }
