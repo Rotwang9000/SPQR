@@ -319,7 +319,6 @@ async function generateStandardQR(text) {
         throw new Error('Failed to generate standard QR code');
     }
 }
-
 async function generateSpqrClient(text, options) {
 	// Pure client-side SPQR SVG composition using qrcode-generator
 	const layers = Math.max(2, Math.min(3, options.layers || 3));
@@ -362,7 +361,13 @@ async function generateSpqrClient(text, options) {
 		baseText = parts[0] || '';
 		redText = parts[1] || '';
 		greenText = isEightColour ? (parts[2] ?? '') : null;
-		console.log(`SPQR Standard mode: All layers EC 'L', ${splits} layers${isEightColour ? ` (${baseText.length}+${greenText?.length || 0}+${redText.length} bytes)` : ''}`);
+		console.log(`SPQR Standard mode: All layers EC 'L', ${splits} layers`);
+		if (!isEightColour) {
+			console.log(`   Base layer (${baseText.length} bytes): "${baseText}"`);
+			console.log(`   Red layer (${redText.length} bytes): "${redText}"`);
+		} else {
+			console.log(`   Byte counts: ${baseText.length}+${greenText?.length || 0}+${redText.length}`);
+		}
 	}
 
 	// First pass to find max version needed
@@ -400,6 +405,26 @@ async function generateSpqrClient(text, options) {
 
 	const modules = baseQr.getModuleCount();
 	const margin = 4;
+	const meta = {
+		mode: ecMode,
+		palette: colours,
+		isEightColour,
+		version: targetVersion,
+		modules,
+		moduleCounts,
+		baseBytes: baseText.length,
+		redBytes: redText.length,
+		greenBytes: greenText ? greenText.length : 0,
+		parityBytes: parityText ? parityText.length : 0
+	};
+	window.__lastSpqrMeta = meta;
+	if (!Array.isArray(window.__spqrMetaHistory)) {
+		window.__spqrMetaHistory = [];
+	}
+	window.__spqrMetaHistory.push(meta);
+	if (window.__spqrMetaHistory.length > 12) {
+		window.__spqrMetaHistory.shift();
+	}
 
 	// Use larger module sizes for better visibility and scanning
 	// Responsive sizing based on viewport
@@ -410,8 +435,25 @@ async function generateSpqrClient(text, options) {
 	const width = totalModules * cell;
 	const height = width;
 
-	// Helper to query a module
+	// Helper to query a module (qrcode-generator uses isDark(row, col))
 	const dark = (qr, x, y) => (qr ? qr.isDark(y, x) : false);
+
+	// Debug: log first row of each QR layer to help verify orientation
+	if (typeof window !== 'undefined' && window?.localStorage?.getItem('spqrDebugLayers') !== 'off') {
+		try {
+			const debugRowBase = Array.from({ length: modules }, (_, cx) => dark(baseQr, cx, 0) ? '█' : '·').join('');
+			const debugRowRed = Array.from({ length: modules }, (_, cx) => dark(redQr, cx, 0) ? '█' : '·').join('');
+			const debugRowGreen = isEightColour && greenQr ? Array.from({ length: modules }, (_, cx) => dark(greenQr, cx, 0) ? '█' : '·').join('') : null;
+			const baseMods = Array.from({ length: modules }, (_, y) => Array.from({ length: modules }, (_, x) => dark(baseQr, x, y)));
+			const redMods = Array.from({ length: modules }, (_, y) => Array.from({ length: modules }, (_, x) => dark(redQr, x, y)));
+			const greenMods = isEightColour && greenQr ? Array.from({ length: modules }, (_, y) => Array.from({ length: modules }, (_, x) => dark(greenQr, x, y))) : null;
+			window.__spqrGeneratorMods = { base: baseMods, red: redMods, green: greenMods };
+			window.__spqrGeneratorDebug = { modules, base: debugRowBase, red: debugRowRed, green: debugRowGreen };
+			console.log('[SPQR] Generator layer row0:', window.__spqrGeneratorDebug);
+		} catch (err) {
+			console.warn('[SPQR] Debug row logging failed:', err);
+		}
+	}
 
 	// Calculate sizing for decorations and label while keeping QR footprint unchanged
 	const minDim = modules * cell;
@@ -774,7 +816,6 @@ function isInFinderRing(x, y, modules) {
 	const inInner = (x >= 2 && x <= 4) && (y >= 2 && y <= 4);
 	return true && !inInner ? true : false;
 }
-
 function drawFinder(append, modules, margin, cell) {
 	const addRect = (gx, gy, w, h) => {
 		append(`<rect x="${(gx+margin)*cell}" y="${(gy+margin)*cell}" width="${w*cell}" height="${h*cell}" fill="#000000"/>`);
@@ -792,7 +833,6 @@ function drawFinder(append, modules, margin, cell) {
 	drawAt(modules-7,0);
 	drawAt(0,modules-7);
 }
-
 function drawFinderKeys(append, modules, margin, cell, colours, isEightColour) {
 	const fillInner = (gx, gy, colourOrPair) => {
 		const x0 = (gx+2+margin) * cell;
@@ -835,6 +875,39 @@ function drawFinderKeys(append, modules, margin, cell, colours, isEightColour) {
 		fillInner(modules-7,0,colours[3]); // TR: black
 		fillInner(0,modules-7,colours[3]); // BL: black
 	}
+}
+
+function validateCmyFinderPalette(palette, threshold = 45) {
+	if (!palette) {
+		return { ok: false, passes: {}, strongCount: 0 };
+	}
+	const clamp = (value) => (typeof value === 'number' && Number.isFinite(value)) ? value : 0;
+	const components = (p) => ({
+		r: clamp(p?.r),
+		g: clamp(p?.g),
+		b: clamp(p?.b)
+	});
+	const W = components(palette.W);
+	const R = components(palette.R);
+	const G = components(palette.G);
+	const Y = components(palette.Y);
+	const K = components(palette.K);
+	const M = components(palette.M);
+	const C = components(palette.C);
+	const B = components(palette.B);
+	const passes = {
+		W: W.r > 200 && W.g > 200 && W.b > 200,
+		K: K.r < 80 && K.g < 80 && K.b < 80,
+		R: (R.r - Math.max(R.g, R.b)) >= threshold,
+		G: (G.g - Math.max(G.r, G.b)) >= threshold,
+		Y: (Math.min(Y.r, Y.g) - Y.b) >= threshold,
+		M: (Math.min(M.r, M.b) - M.g) >= threshold,
+		C: (Math.min(C.g, C.b) - C.r) >= threshold,
+		B: (B.b - Math.max(B.r, B.g)) >= threshold
+	};
+	const strongCount = ['R', 'G', 'Y', 'M', 'C', 'B'].filter(key => passes[key]).length;
+	const ok = passes.W && passes.K && strongCount >= 4;
+	return { ok, passes, strongCount };
 }
 
 async function svgToPngDataUrl(svg, width, height) {
@@ -989,10 +1062,17 @@ function gridFromCornerMarkers(markers, width, height) {
 	// Arms extend ~1.8× margin inward, and margin is typically 4 modules
 	const avgArmLen = (tl.armH + tl.armV + tr.armH + tr.armV + bl.armH + bl.armV) / 6;
 	const estimatedMarginPx = avgArmLen / 1.8;
-	const estimatedQRSize = avgSize - 2 * estimatedMarginPx;
 	
-	console.log(`   📊 Estimated margin: ${estimatedMarginPx.toFixed(1)}px (from arm length ${avgArmLen.toFixed(1)}px)`);
-	console.log(`   📐 Estimated QR size: ${estimatedQRSize.toFixed(1)}px`);
+	// The ACTUAL QR code size is the distance between inner edges of opposite corner markers
+	// Markers sit AT the edge, so distance between them = total canvas
+	// But QR code modules span from one marker's inner edge to opposite marker's inner edge
+	// Inner edge is at: edge + armLength (approximately)
+	const qrWidthPx = widthPx - 2 * avgArmLen;
+	const qrHeightPx = heightPx - 2 * avgArmLen;
+	const estimatedQRSize = (qrWidthPx + qrHeightPx) / 2;
+	
+	console.log(`   📊 Estimated margin from arms: ${avgArmLen.toFixed(1)}px`);
+	console.log(`   📐 QR code size (between inner edges): ${estimatedQRSize.toFixed(1)}px`);
 	
 	// Try common QR sizes
 	const possibleVersions = [21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 73];
@@ -1002,8 +1082,9 @@ function gridFromCornerMarkers(markers, width, height) {
 	for (const v of possibleVersions) {
 		const modulePx = estimatedQRSize / v;
 		if (modulePx >= 3 && modulePx <= 20) { // Reasonable module sizes
-			const totalSize = v * modulePx + 2 * (modulePx * 4); // QR + margin
-			const diff = Math.abs(avgSize - totalSize);
+			// Check how well this version + modulePx fits the estimated QR size
+			const testQRSize = v * modulePx;
+			const diff = Math.abs(estimatedQRSize - testQRSize);
 			if (diff < bestDiff) {
 				bestDiff = diff;
 				bestVersion = v;
@@ -1012,11 +1093,11 @@ function gridFromCornerMarkers(markers, width, height) {
 	}
 	
 	const modulePx = estimatedQRSize / bestVersion;
-	const marginModules = 4;
-	const marginPx = modulePx * marginModules;
+	const marginPx = avgArmLen / 1.8; // Arms are 1.8× the margin
 	const originX = Math.round(marginPx);
 	const originY = Math.round(marginPx);
 	
+	const marginModules = Math.round(marginPx / modulePx);
 	console.log(`   ✅ Best match: Version ${bestVersion} (${modulePx.toFixed(2)}px/module, ${marginModules}-module margin)`);
 	console.log(`   📍 Grid origin: (${originX},${originY})`);
 	
@@ -1032,6 +1113,38 @@ function gridFromCornerMarkers(markers, width, height) {
 		originY,
 		detectionMethod: 'corner-markers'
 	};
+}
+
+const DEFAULT_COLOUR_SEPARATION_THRESHOLD = 60;
+
+function colourDistanceRGB(a, b) {
+	if (!a || !b) return Infinity;
+	const ar = typeof a.r === 'number' ? a.r : Array.isArray(a) ? a[0] : 0;
+	const ag = typeof a.g === 'number' ? a.g : Array.isArray(a) ? a[1] : 0;
+	const ab = typeof a.b === 'number' ? a.b : Array.isArray(a) ? a[2] : 0;
+	const br = typeof b.r === 'number' ? b.r : Array.isArray(b) ? b[0] : 0;
+	const bg = typeof b.g === 'number' ? b.g : Array.isArray(b) ? b[1] : 0;
+	const bb = typeof b.b === 'number' ? b.b : Array.isArray(b) ? b[2] : 0;
+	return Math.hypot(ar - br, ag - bg, ab - bb);
+}
+
+function minPaletteSeparation(palette, keys) {
+	if (!palette) return 0;
+	const colourKeys = keys || Object.keys(palette);
+	let minDist = Infinity;
+	for (let i = 0; i < colourKeys.length; i++) {
+		const keyA = colourKeys[i];
+		const colourA = palette[keyA];
+		if (!colourA) continue;
+		for (let j = i + 1; j < colourKeys.length; j++) {
+			const keyB = colourKeys[j];
+			const colourB = palette[keyB];
+			if (!colourB) continue;
+			const dist = colourDistanceRGB(colourA, colourB);
+			if (dist < minDist) minDist = dist;
+		}
+	}
+	return minDist === Infinity ? 0 : minDist;
 }
 
 function estimateGrid(mask, width, height) {
@@ -1087,10 +1200,26 @@ function locateQRStructure(data, width, height) {
 		return (r < threshold && g < threshold && b < threshold);
 	};
 	
-    const finderCandidates = [];
+	const finderCandidates = [];
+
+	let minBlackX = width, maxBlackX = -1, minBlackY = height, maxBlackY = -1;
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			if (isQRPixel(x, y)) {
+				if (x < minBlackX) minBlackX = x;
+				if (x > maxBlackX) maxBlackX = x;
+				if (y < minBlackY) minBlackY = y;
+				if (y > maxBlackY) maxBlackY = y;
+			}
+		}
+	}
+	const darkWidth = (maxBlackX >= minBlackX) ? (maxBlackX - minBlackX + 1) : width;
+	const darkHeight = (maxBlackY >= minBlackY) ? (maxBlackY - minBlackY + 1) : height;
+	console.log(`   Dark bounding box: width=${darkWidth}, height=${darkHeight}, min=(${minBlackX},${minBlackY}), max=(${maxBlackX},${maxBlackY})`);
 	
 	// Horizontal scan with better spacing
-    for (let y = 0; y < height; y += Math.max(1, Math.floor(height/50))) {
+    const rowStep = Math.max(1, Math.floor(height / 120));
+    for (let y = 0; y < height; y += rowStep) {
 		const runs = [];
 		let last = false, len = 0;
 		for (let x = 0; x <= width; x++) {
@@ -1127,7 +1256,8 @@ function locateQRStructure(data, width, height) {
 	}
 	
 	// Vertical scan
-    for (let x = 0; x < width; x += Math.max(1, Math.floor(width/50))) {
+    const colStep = Math.max(1, Math.floor(width / 120));
+    for (let x = 0; x < width; x += colStep) {
 		const runs = [];
 		let last = false, len = 0;
 		for (let y = 0; y <= height; y++) {
@@ -1240,21 +1370,45 @@ function locateQRStructure(data, width, height) {
 	const avgDist = (distTL_TR + distTL_BL) / 2;
 	
 	// Use average module size from detections as starting point
-	let modulePx = Math.round((TL.modulePx + TR.modulePx + BL.modulePx) / 3);
-	
-	// Refine: distance should be (modules - 7) * modulePx
-	// For smallest QR (21x21): distance ≈ 14 * modulePx
-	let qrModules = Math.round(avgDist / modulePx) + 7;
-	
-	// Round to valid QR version: 21, 25, 29, 33, ... (4n + 17 where n=1,2,3...)
-	// Use ceiling instead of rounding to avoid cutting off modules
-	const version = Math.ceil((qrModules - 17) / 4);
-	qrModules = Math.max(21, version * 4 + 17);
-	
-	// Recalculate modulePx based on actual QR size
-	modulePx = avgDist / (qrModules - 7); // Use float for more accuracy
-	
-	console.log(`   Size calculation: avgDist=${avgDist.toFixed(1)}px, initial guess=${Math.round(avgDist / modulePx) + 7} modules, rounded to version ${version} = ${qrModules} modules`);
+	const modulePxMean = (TL.modulePx + TR.modulePx + BL.modulePx) / 3;
+	let modulePx = modulePxMean;
+	let qrModules = 21;
+	let version = 1;
+	let bestVersionScore = Infinity;
+	const modulesFromMean = (avgDist / modulePxMean) + 7;
+	const maxDim = Math.max(width, height);
+	const minModulePx = Math.max(2, modulePxMean * 0.4);
+	const maxModulePx = modulePxMean * 2.5;
+	for (let v = 1; v <= 40; v++) {
+		const modulesCandidate = 17 + 4 * (v - 1);
+		const modulePxCandidate = avgDist / (modulesCandidate - 7);
+		if (!Number.isFinite(modulePxCandidate)) continue;
+		if (modulePxCandidate < minModulePx || modulePxCandidate > maxModulePx) continue;
+		const approxSize = modulePxCandidate * (modulesCandidate + 8);
+		if (approxSize > maxDim * 1.2) continue;
+		const approxHeight = approxSize; // QR codes are square
+		const widthRatio = Math.abs(approxSize - darkWidth) / Math.max(1, darkWidth);
+		const heightRatio = Math.abs(approxHeight - darkHeight) / Math.max(1, darkHeight);
+		const modulesDiffRatio = Math.abs(modulesCandidate - modulesFromMean) / Math.max(1, modulesCandidate);
+		const modulePxDiffRatio = Math.abs(modulePxCandidate - modulePxMean) / Math.max(1, modulePxMean);
+		const score = widthRatio * 4 + heightRatio * 4 + modulesDiffRatio + modulePxDiffRatio * 0.5;
+		if (score < bestVersionScore) {
+			bestVersionScore = score;
+			qrModules = modulesCandidate;
+			modulePx = modulePxCandidate;
+			version = v;
+		}
+	}
+	if (!Number.isFinite(modulePx) || bestVersionScore === Infinity) {
+		// Fallback to previous heuristic if scoring failed
+		modulePx = modulePxMean;
+		qrModules = Math.round(avgDist / modulePx) + 7;
+		version = Math.ceil(Math.max(0, (qrModules - 17)) / 4);
+		qrModules = Math.max(21, version * 4 + 17);
+		modulePx = avgDist / (qrModules - 7);
+	}
+
+	console.log(`   Size calculation: avgDist=${avgDist.toFixed(1)}px, modulePx≈${modulePxMean.toFixed(2)}px → version ${version} (${qrModules} modules), modulePx=${modulePx.toFixed(2)}px`);
 	
 	// Origin calculation: TL finder center is at module position (3.5, 3.5) within the 7x7 finder
 	// The finder starts at module (0,0) of the QR grid (including 4-module quiet zone)
@@ -1569,7 +1723,6 @@ function displayResults(standard, bwrg, cmyrgb) {
     // Set up color customization listeners for CMYRGB
     setupCMYRGBColorListeners();
 }
-
 // Handle EC mode change - regenerate only CMYRGB
 async function handleECModeChange(e) {
     const newMode = e.target.value;
@@ -1663,7 +1816,6 @@ function setupBWRGColorListeners() {
         });
     });
 }
-
 function setupCMYRGBColorListeners() {
     const pickers = document.querySelectorAll('.cmyrgb-color-picker');
     const hexInputs = document.querySelectorAll('.cmyrgb-color-hex');
@@ -1689,7 +1841,6 @@ function setupCMYRGBColorListeners() {
         });
     });
 }
-
 async function updateBWRGColors() {
     const colorOrder = ['white', 'red', 'green', 'black'];
     window.bwrgColors = colorOrder.map(c => {
@@ -2081,18 +2232,25 @@ function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
 function extractRoiFromGrid(imageData, grid, paddingModules = 1) {
 	const { data, width, height } = imageData;
-	const padPx = paddingModules * grid.modulePx;
-	const x0 = clamp(grid.originX - padPx, 0, width);
-	const y0 = clamp(grid.originY - padPx, 0, height);
-	const sizePx = (grid.qrModules + 8) * grid.modulePx + 2 * padPx;
-	const w = clamp(sizePx, 1, width - x0);
-	const h = clamp(sizePx, 1, height - y0);
+	const originX = Math.round(grid.originX);
+	const originY = Math.round(grid.originY);
+	const padPx = Math.max(0, Math.round(paddingModules * grid.modulePx));
+	const x0 = clamp(originX - padPx, 0, Math.max(0, width - 1));
+	const y0 = clamp(originY - padPx, 0, Math.max(0, height - 1));
+	const rawSizePx = (grid.qrModules + 8) * grid.modulePx + 2 * padPx;
+	const sizePx = Math.max(1, Math.round(rawSizePx));
+	const maxWidth = Math.max(1, width - x0);
+	const maxHeight = Math.max(1, height - y0);
+	const w = Math.min(sizePx, maxWidth);
+	const h = Math.min(sizePx, maxHeight);
 	const rgba = new Uint8ClampedArray(w * h * 4);
+	const rowLength = w * 4;
+	const rowStride = width * 4;
 	for (let y = 0; y < h; y++) {
 		const srcY = y0 + y;
-		const srcOff = (srcY * width + x0) * 4;
-		const dstOff = y * w * 4;
-		rgba.set(data.subarray(srcOff, srcOff + w * 4), dstOff);
+		const srcOff = srcY * rowStride + x0 * 4;
+		const dstOff = y * rowLength;
+		rgba.set(data.subarray(srcOff, srcOff + rowLength), dstOff);
 	}
 	return { rgba, width: w, height: h, offsetX: x0, offsetY: y0, paddingPx: padPx };
 }
@@ -2169,8 +2327,13 @@ function sampleBilinearPixel(data, width, height, fx, fy) {
 	}
 	return out;
 }
-
-function resampleGridToSquare(imageData, grid, targetModulePx, extraMarginModules = 1) {
+function sampleNearestPixel(data, width, height, x, y) {
+	const sx = clamp(Math.round(x), 0, width - 1);
+	const sy = clamp(Math.round(y), 0, height - 1);
+	const idx = (sy * width + sx) * 4;
+	return [data[idx], data[idx + 1], data[idx + 2]];
+}
+function resampleGridToSquare(imageData, grid, targetModulePx, extraMarginModules = 1, method = 'bilinear') {
 	const corners = computePerspectiveGridCorners(grid, extraMarginModules);
 	if (!corners) {
 		return null;
@@ -2189,7 +2352,9 @@ function resampleGridToSquare(imageData, grid, targetModulePx, extraMarginModule
 			const u = outWidth > 1 ? x / (outWidth - 1) : 0;
 			const sx = corners.tl.x * (1 - u) * (1 - v) + corners.tr.x * u * (1 - v) + corners.br.x * u * v + corners.bl.x * (1 - u) * v;
 			const sy = corners.tl.y * (1 - u) * (1 - v) + corners.tr.y * u * (1 - v) + corners.br.y * u * v + corners.bl.y * (1 - u) * v;
-			const sampled = sampleBilinearPixel(srcData, srcWidth, srcHeight, sx, sy);
+			const sampled = method === 'nearest'
+				? sampleNearestPixel(srcData, srcWidth, srcHeight, sx, sy)
+				: sampleBilinearPixel(srcData, srcWidth, srcHeight, sx, sy);
 			const di = (y * outWidth + x) * 4;
 			outData[di] = sampled[0];
 			outData[di+1] = sampled[1];
@@ -2337,9 +2502,11 @@ function enhanceImageContrast(rgba, width, height) {
 async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	const extraPaddingModules = 1;
 	let resampled = null;
-	if (grid && grid.finders && grid.finders.length >= 3) {
+	const isFileSource = window.__SPQR_DECODE_SOURCE === 'file';
+	const resampleMethod = isFileSource ? 'nearest' : 'bilinear';
+	if (!isFileSource && grid && grid.finders && grid.finders.length >= 3) {
 		try {
-			resampled = resampleGridToSquare(imageData, grid, targetModulePx, extraPaddingModules);
+			resampled = resampleGridToSquare(imageData, grid, targetModulePx, extraPaddingModules, resampleMethod);
 			if (resampled) {
 				console.log(`   📦 ROI extracted via perspective warp: ${resampled.width}×${resampled.height}`);
 			}
@@ -2363,8 +2530,10 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 			source: 'axis'
 		};
 	}
-	if (maybeReduceBanding(resampled.rgba, resampled.width, resampled.height)) {
-		console.log('   🔧 Applied mild blur to suppress banding artefacts');
+	if (window.__SPQR_DECODE_SOURCE === 'camera') {
+		if (maybeReduceBanding(resampled.rgba, resampled.width, resampled.height)) {
+			console.log('   🔧 Applied mild blur to suppress banding artefacts');
+		}
 	}
 	
 	// AGGRESSIVE PREPROCESSING: Only enhance if image looks degraded!
@@ -2389,20 +2558,65 @@ async function decodeFromGridROI(imageData, grid, targetModulePx = 8) {
 	const finderMarginModules = 4 + extraPaddingModules;
 	const finderSamples = sampleFinderRefsWithOrigin(id.data, id.width, id.height, targetModulePx, grid.qrModules, finderMarginModules, 0, 0);
 	if (finderSamples) {
-		window.cameraCalibration = finderSamples;
-		console.log('Calibrated colors from finder patterns:', finderSamples);
+		const source = window.__SPQR_DECODE_SOURCE || 'unknown';
+		const separation = minPaletteSeparation(finderSamples.samples, ['red', 'green', 'black']);
+		finderSamples._separation = separation;
+		finderSamples._source = source;
+		finderSamples._fromCamera = source === 'camera';
+		if (source === 'camera') {
+			if (separation >= DEFAULT_COLOUR_SEPARATION_THRESHOLD) {
+				window.cameraCalibration = finderSamples;
+				console.log(`Calibrated colors from finder patterns (${source}) separation=${separation.toFixed(1)}:`, finderSamples);
+			} else {
+				console.log(`Skipping finder calibration (source=${source}) due to low colour separation ${separation.toFixed(1)}`);
+				if (!window.cameraCalibration || window.cameraCalibration._source !== 'camera') {
+					window.cameraCalibration = null;
+				}
+			}
+		} else {
+			if (separation >= DEFAULT_COLOUR_SEPARATION_THRESHOLD) {
+				window.cameraCalibration = finderSamples;
+				console.log(`Finder calibration accepted for ${source} source (separation=${separation.toFixed(1)})`);
+			} else {
+				window.cameraCalibration = {
+					type: 'BWRG',
+					samples: {
+						red: { r: 255, g: 0, b: 0 },
+						green: { r: 0, g: 255, b: 0 },
+						black: { r: 0, g: 0, b: 0 },
+						white: { r: 255, g: 255, b: 255 }
+					},
+					_source: source,
+					_fromCamera: false,
+					_separation: DEFAULT_COLOUR_SEPARATION_THRESHOLD
+				};
+				console.log(`Finder calibration weak (${separation.toFixed(1)}) for ${source}; using canonical BWRG palette`);
+			}
+		}
 	}
 	// Also calibrate CMYRGB palette from ORIGINAL image (before resampling) to avoid blurring
 	// NOTE: Don't mark as _fromCamera here - this is called for both camera and file uploads
 	// Only the camera scan loop should mark it as _fromCamera
 	try {
+		const paletteKeys = ['W','R','G','Y','K','M','C','B'];
+		const calibration = window.cameraCalibrationCMY;
+		const calibrationUsable = calibration && calibration._separation >= DEFAULT_COLOUR_SEPARATION_THRESHOLD;
+		const calibrationSource = calibrationUsable ? (calibration._source || (calibration._fromCamera ? 'camera' : 'unknown')) : null;
+		const fromCamera = calibrationUsable && calibration._fromCamera;
 		const cmyCal = sampleCMYRGBFinderPalette(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, grid.originX, grid.originY);
 		if (cmyCal && cmyCal.W) {
-			window.cameraCalibrationCMY = cmyCal;
-			console.log('Calibrated CMYRGB palette from ORIGINAL image finders:', cmyCal);
+			const validation = validateCmyFinderPalette(cmyCal);
+			if (validation.ok) {
+				window.cameraCalibrationCMY = cmyCal;
+				console.log('Calibrated CMYRGB palette from ORIGINAL image finders:', cmyCal);
+			} else {
+				const passed = Object.entries(validation.passes).filter(([,v])=>v).map(([k])=>k).join(', ') || 'none';
+				console.log(`CMYRGB palette from ORIGINAL image finders rejected (passes: ${passed})`);
+				window.cameraCalibrationCMY = null;
+			}
 		}
-	} catch (e) {
-		// ignore calibration errors
+	} catch (err) {
+		console.log('CMYRGB palette sampling failed:', err);
 	}
 	
 	// TRY ZXING FIRST on the enhanced image (more robust than jsQR for degraded images!)
@@ -2454,129 +2668,160 @@ async function scanFromVideo() {
 	const overlayCtx = overlayCanvas.getContext('2d');
 	
 	if (video.readyState === video.HAVE_ENOUGH_DATA) {
-		// Match canvas size to video source
-		canvas.width = video.videoWidth;
-		canvas.height = video.videoHeight;
-		overlayCanvas.width = video.videoWidth;
-		overlayCanvas.height = video.videoHeight;
-		// Match overlay display size to displayed video size for correct overlay alignment
-		overlayCanvas.style.width = video.clientWidth + 'px';
-		overlayCanvas.style.height = video.clientHeight + 'px';
-		
-		ctx.imageSmoothingEnabled = false; // Preserve exact pixels for SPQR
-		ctx.drawImage(video, 0, 0);
-		
-		// Clear overlay
-		overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-		// Draw focus reticle to assist alignment
-		overlayCtx.save();
-		overlayCtx.strokeStyle = 'rgba(255,255,255,0.35)';
-		overlayCtx.lineWidth = 2;
-		const reticleSize = Math.min(overlayCanvas.width, overlayCanvas.height) * 0.18;
-		const centerX = overlayCanvas.width / 2;
-		const centerY = overlayCanvas.height / 2;
-		overlayCtx.strokeRect(centerX - reticleSize / 2, centerY - reticleSize / 2, reticleSize, reticleSize);
-		overlayCtx.beginPath();
-		overlayCtx.moveTo(centerX - reticleSize * 0.6, centerY);
-		overlayCtx.lineTo(centerX + reticleSize * 0.6, centerY);
-		overlayCtx.moveTo(centerX, centerY - reticleSize * 0.6);
-		overlayCtx.lineTo(centerX, centerY + reticleSize * 0.6);
-		overlayCtx.stroke();
-		overlayCtx.restore();
-		
-		const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-		
-		// Respect pause window after a success to avoid flicker / repeat triggers
-		const nowTs = Date.now();
-		if (nowTs < scanPauseUntil) {
-			requestAnimationFrame(scanFromVideo);
-			return;
-		}
-		
-		// Try standard QR detection first (fast and gives location)
-		let code = jsQR(imageData.data, imageData.width, imageData.height, {
-			inversionAttempts: "dontInvert"
-		});
-		
-		if (code && code.data) {
-			// Found QR structure! Draw detection box
-			drawDetectionBox(overlayCtx, code.location, '#00ff00');
+		window.__SPQR_DECODE_SOURCE = 'camera';
+		try {
+			// Match canvas size to video source
+			canvas.width = video.videoWidth;
+			canvas.height = video.videoHeight;
+			overlayCanvas.width = video.videoWidth;
+			overlayCanvas.height = video.videoHeight;
+			// Match overlay display size to displayed video size for correct overlay alignment
+			overlayCanvas.style.width = video.clientWidth + 'px';
+			overlayCanvas.style.height = video.clientHeight + 'px';
 			
-			// Successfully decoded as standard QR
-			status.textContent = '✅ Standard QR found & decoded!';
-			status.style.background = 'rgba(0, 200, 0, 0.8)';
-			lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
+			ctx.imageSmoothingEnabled = false; // Preserve exact pixels for SPQR
+			ctx.drawImage(video, 0, 0);
 			
-			if (code.data !== lastDecodedText) {
-				lastDecodedText = code.data;
-				handleScannedCode(code.data);
+			// Clear overlay
+			overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+			// Draw focus reticle to assist alignment
+			overlayCtx.save();
+			overlayCtx.strokeStyle = 'rgba(255,255,255,0.35)';
+			overlayCtx.lineWidth = 2;
+			const reticleSize = Math.min(overlayCanvas.width, overlayCanvas.height) * 0.18;
+			const centerX = overlayCanvas.width / 2;
+			const centerY = overlayCanvas.height / 2;
+			overlayCtx.strokeRect(centerX - reticleSize / 2, centerY - reticleSize / 2, reticleSize, reticleSize);
+			overlayCtx.beginPath();
+			overlayCtx.moveTo(centerX - reticleSize * 0.6, centerY);
+			overlayCtx.lineTo(centerX + reticleSize * 0.6, centerY);
+			overlayCtx.moveTo(centerX, centerY - reticleSize * 0.6);
+			overlayCtx.lineTo(centerX, centerY + reticleSize * 0.6);
+			overlayCtx.stroke();
+			overlayCtx.restore();
+			
+			const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+			
+			// Respect pause window after a success to avoid flicker / repeat triggers
+			const nowTs = Date.now();
+			if (nowTs < scanPauseUntil) {
+				requestAnimationFrame(scanFromVideo);
+				return;
 			}
-			// Pause briefly then continue scanning
-			scanPauseUntil = Date.now() + 1500;
-			requestAnimationFrame(scanFromVideo);
-			return;
-		}
-		
-		// jsQR failed direct decode - try with grid-based ROI extraction for better focus/distortion handling
-		const gridForMono = locateQRStructure(imageData.data, imageData.width, imageData.height);
-		if (gridForMono && gridForMono.qrModules && gridForMono.modulePx) {
-			// Try decoding from extracted ROI
-			try {
-				const roiResult = await decodeFromGridROI(imageData, gridForMono, 8);
-				if (roiResult && roiResult.standard) {
-					drawGridRect(overlayCtx, gridForMono.originX, gridForMono.originY, 
-						(gridForMono.qrModules + 8) * gridForMono.modulePx, 
-						(gridForMono.qrModules + 8) * gridForMono.modulePx, '#00ff00');
-					status.textContent = '✅ Standard QR decoded (ROI)!';
-					status.style.background = 'rgba(0, 200, 0, 0.8)';
-					lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
-					
-					if (roiResult.standard !== lastDecodedText) {
-						lastDecodedText = roiResult.standard;
-						handleScannedCode(roiResult.standard);
-					}
-					scanPauseUntil = Date.now() + 1500;
-					requestAnimationFrame(scanFromVideo);
-					return;
+			
+			// Try standard QR detection first (fast and gives location)
+			let code = jsQR(imageData.data, imageData.width, imageData.height, {
+				inversionAttempts: "dontInvert"
+			});
+			
+			if (code && code.data) {
+				// Found QR structure! Draw detection box
+				drawDetectionBox(overlayCtx, code.location, '#00ff00');
+				
+				// Successfully decoded as standard QR
+				status.textContent = '✅ Standard QR found & decoded!';
+				status.style.background = 'rgba(0, 200, 0, 0.8)';
+				lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
+				
+				if (code.data !== lastDecodedText) {
+					lastDecodedText = code.data;
+					handleScannedCode(code.data);
 				}
-			} catch (err) {
-				console.log('   ⚠️  ROI decode attempt failed:', err.message);
-			}
-		}
-		
-		// No direct decode - try to locate structure using our finder analysis
-		const grid = locateQRStructure(imageData.data, imageData.width, imageData.height);
-        if (grid && grid.qrModules && grid.modulePx) {
-			// Found structure - show orange box
-			drawGridRect(overlayCtx, grid.originX, grid.originY, (grid.qrModules + 8) * grid.modulePx, (grid.qrModules + 8) * grid.modulePx, '#ff9900');
-			status.textContent = '⚠️  QR structure found - trying SPQR decode...';
-			status.style.background = 'rgba(255, 153, 0, 0.8)';
-			lastScanState = { found: true, decoded: false, lastUpdate: Date.now() };
-			
-			// Provide grid hint and palette calibration from finder refs for decoders
-			window.currentGridHint = { modules: grid.qrModules, modulePx: grid.modulePx, originX: grid.originX, originY: grid.originY };
-			window.cameraCalibration = sampleFinderRefsWithOrigin(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, 4, grid.originX, grid.originY);
-			const cmyCal = sampleCMYRGBFinderPalette(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, grid.originX, grid.originY);
-			if (cmyCal) {
-				cmyCal._fromCamera = true; // Mark as from camera for decoder
-				window.cameraCalibrationCMY = cmyCal;
+				// Pause briefly then continue scanning
+				scanPauseUntil = Date.now() + 1500;
+				requestAnimationFrame(scanFromVideo);
+				return;
 			}
 			
-            // Compute quality and schedule heavy decode attempts; cancel older ones if a better frame arrives
-            const qualityMetrics = computeFrameQuality(imageData, grid);
-            const quality = qualityMetrics.score;
-            lastFrameQualityMetrics = qualityMetrics;
-            console.log(`   📊 Frame quality score: ${Math.round(quality)} (best=${Math.round(bestFrameQuality)})`);
-            if (quality >= bestFrameQuality * 0.98) {
-                scheduleDecodeFromGrid(imageData, grid, quality);
-            }
-		} else {
-			// No QR structure found at all
-			const now = Date.now();
-			if (now - lastScanState.lastUpdate > 500) {
-				status.textContent = '🔍 Searching for QR code...';
-				status.style.background = 'rgba(0, 0, 0, 0.7)';
-				lastScanState = { found: false, decoded: false, lastUpdate: now };
+			// jsQR failed direct decode - try with grid-based ROI extraction for better focus/distortion handling
+			const gridForMono = locateQRStructure(imageData.data, imageData.width, imageData.height);
+			if (gridForMono && gridForMono.qrModules && gridForMono.modulePx) {
+				// Try decoding from extracted ROI
+				try {
+					const roiResult = await decodeFromGridROI(imageData, gridForMono, 8);
+					if (roiResult && roiResult.standard) {
+						drawGridRect(overlayCtx, gridForMono.originX, gridForMono.originY, 
+							(gridForMono.qrModules + 8) * gridForMono.modulePx, 
+							(gridForMono.qrModules + 8) * gridForMono.modulePx, '#00ff00');
+						status.textContent = '✅ Standard QR decoded (ROI)!';
+						status.style.background = 'rgba(0, 200, 0, 0.8)';
+						lastScanState = { found: true, decoded: true, lastUpdate: Date.now() };
+						
+						if (roiResult.standard !== lastDecodedText) {
+							lastDecodedText = roiResult.standard;
+							handleScannedCode(roiResult.standard);
+						}
+						scanPauseUntil = Date.now() + 1500;
+						requestAnimationFrame(scanFromVideo);
+						return;
+					}
+				} catch (err) {
+					console.log('   ⚠️  ROI decode attempt failed:', err.message);
+				}
+			}
+			
+			// No direct decode - try to locate structure using our finder analysis
+			const grid = locateQRStructure(imageData.data, imageData.width, imageData.height);
+			if (grid && grid.qrModules && grid.modulePx) {
+				// Found structure - show orange box
+				drawGridRect(overlayCtx, grid.originX, grid.originY, (grid.qrModules + 8) * grid.modulePx, (grid.qrModules + 8) * grid.modulePx, '#ff9900');
+				status.textContent = '⚠️  QR structure found - trying SPQR decode...';
+				status.style.background = 'rgba(255, 153, 0, 0.8)';
+				lastScanState = { found: true, decoded: false, lastUpdate: Date.now() };
+				
+				// Provide grid hint and palette calibration from finder refs for decoders
+				window.currentGridHint = { modules: grid.qrModules, modulePx: grid.modulePx, originX: grid.originX, originY: grid.originY };
+				const finderSamples = sampleFinderRefsWithOrigin(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, 4, grid.originX, grid.originY);
+				if (finderSamples) {
+					const separation = minPaletteSeparation(finderSamples.samples, ['red', 'green', 'black']);
+					finderSamples._source = 'camera';
+					finderSamples._fromCamera = true;
+					finderSamples._separation = separation;
+					if (separation >= DEFAULT_COLOUR_SEPARATION_THRESHOLD) {
+						window.cameraCalibration = finderSamples;
+						console.log(`Camera finder calibration separation=${separation.toFixed(1)}`, finderSamples);
+					} else {
+						console.log(`Skipping camera finder calibration due to low separation ${separation.toFixed(1)}`);
+						window.cameraCalibration = null;
+					}
+				} else {
+					window.cameraCalibration = null;
+				}
+				const cmyCal = sampleCMYRGBFinderPalette(imageData.data, imageData.width, imageData.height, grid.modulePx, grid.qrModules, grid.originX, grid.originY);
+				if (cmyCal && cmyCal.W) {
+					const validation = validateCmyFinderPalette(cmyCal);
+					if (validation.ok) {
+						window.cameraCalibrationCMY = cmyCal;
+						console.log('Calibrated CMYRGB palette from ORIGINAL image finders:', cmyCal);
+					} else {
+						const passed = Object.entries(validation.passes).filter(([,v])=>v).map(([k])=>k).join(', ') || 'none';
+						console.log(`CMYRGB palette from ORIGINAL image finders rejected (passes: ${passed})`);
+						window.cameraCalibrationCMY = null;
+					}
+				} else {
+					window.cameraCalibrationCMY = null;
+				}
+				
+				// Compute quality and schedule heavy decode attempts; cancel older ones if a better frame arrives
+				const qualityMetrics = computeFrameQuality(imageData, grid);
+				const quality = qualityMetrics.score;
+				lastFrameQualityMetrics = qualityMetrics;
+				console.log(`   📊 Frame quality score: ${Math.round(quality)} (best=${Math.round(bestFrameQuality)})`);
+				if (quality >= bestFrameQuality * 0.98) {
+					scheduleDecodeFromGrid(imageData, grid, quality);
+				}
+			} else {
+				// No QR structure found at all
+				const now = Date.now();
+				if (now - lastScanState.lastUpdate > 500) {
+					status.textContent = '🔍 Searching for QR code...';
+					status.style.background = 'rgba(0, 0, 0, 0.7)';
+					lastScanState = { found: false, decoded: false, lastUpdate: now };
+				}
+			}
+		} finally {
+			if (window.__SPQR_DECODE_SOURCE === 'camera') {
+				window.__SPQR_DECODE_SOURCE = null;
 			}
 		}
 	}
@@ -2749,7 +2994,6 @@ function computeFrameQuality(imageData, grid) {
     const score = contrast + sharpness * 0.01 + gridBonus + colorRatio * 200;
     return { score, contrast, sharpness, gridBonus, colorRatio };
 }
-
 // Schedule a heavy decode for this frame/grid, cancelling previous if a better one appears
 async function scheduleDecodeFromGrid(imageData, grid, quality) {
     const gen = ++scanGeneration; currentDecodeGen = gen; bestFrameQuality = Math.max(bestFrameQuality, quality);
@@ -2789,7 +3033,6 @@ async function scheduleDecodeFromGrid(imageData, grid, quality) {
         console.log('Decode scheduler error:', e.message);
     }
 }
-
 function sampleFinderRefsWithOrigin(rgba, width, height, modulePx, modulesTotal, marginModules, originX, originY) {
 	// Sample approximate finder inner squares for color references with absolute origin
 	const sampleMean = (cx, cy, radius) => {
@@ -2872,47 +3115,69 @@ async function handleFileUpload(e) {
 		const ctx = canvas.getContext('2d', { willReadFrequently: true });
 		const img = new Image();
 		img.onload = async function() {
-			canvas.width = img.width; canvas.height = img.height;
-			ctx.imageSmoothingEnabled = false; ctx.drawImage(img, 0, 0);
-			const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-			// Standard first
-			const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
-			if (code && code.data) {
-				displayScanResult({ standard: code.data, spqr: null });
-				return;
-			}
-			// Locate structure then crop + scale ROI
-			const grid = locateQRStructure(imageData.data, imageData.width, imageData.height);
-			if (grid) {
-				const roiResult = await decodeFromGridROI(imageData, grid, 8);
+			window.__SPQR_DECODE_SOURCE = 'file';
+			try {
+				const naturalWidth = img.naturalWidth || img.width || canvas.width;
+				const naturalHeight = img.naturalHeight || img.height || canvas.height;
+				if (!naturalWidth || !naturalHeight) {
+					throw new Error(`Image dimensions unavailable (natural=${img.naturalWidth}x${img.naturalHeight}, css=${img.width}x${img.height})`);
+				}
+				canvas.width = naturalWidth;
+				canvas.height = naturalHeight;
+				ctx.setTransform(1, 0, 0, 1, 0, 0);
+				ctx.imageSmoothingEnabled = false;
+				ctx.drawImage(img, 0, 0, naturalWidth, naturalHeight);
+				const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+				// Standard first
+				const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+				if (code && code.data) {
+					displayScanResult({ standard: code.data, spqr: null });
+					return;
+				}
+				// Locate structure then crop + scale ROI
+				const grid = locateQRStructure(imageData.data, imageData.width, imageData.height);
+				if (grid) {
+					const roiResult = await decodeFromGridROI(imageData, grid, 8);
 				if (roiResult) {
 					if (roiResult.type === 'standard') {
 						displayScanResult({ standard: roiResult.text, spqr: null });
+					} else if (roiResult.spqr) {
+						const spqrPayload = {
+							...roiResult.spqr,
+							// Ensure combined string is set when layers are present
+							combined: roiResult.spqr.combined || ((roiResult.spqr.base || '') + (roiResult.spqr.red || '') + (roiResult.spqr.green || ''))
+						};
+						displayScanResult({ standard: null, spqr: spqrPayload });
 					} else {
-						displayScanResult({ standard: null, spqr: { base: roiResult.text, red: null, combined: roiResult.text } });
+						displayScanResult({ standard: null, spqr: { base: null, red: null, combined: null } });
 					}
-					return;
+						return;
+					}
+					// ROI decode failed - clear grid hint before trying full image
+					window.currentGridHint = null;
+					window.cameraCalibration = null;
+					window.cameraCalibrationCMY = null;
 				}
-				// ROI decode failed - clear grid hint before trying full image
-				window.currentGridHint = null;
-				window.cameraCalibration = null;
-				window.cameraCalibrationCMY = null;
-			}
-			// Fallback: SPQR detect full image
-			try {
-				console.log('📸 Attempting SPQR detection on full image...');
-				const spqrResult = detectSPQR(imageData);
-				if (spqrResult) {
-					console.log('✅ SPQR detection succeeded');
-					displayScanResult({ standard: null, spqr: spqrResult });
-				} else {
-					console.log('❌ SPQR detection returned null');
-					displayScanResult({ standard: null, spqr: { base: null, red: null, combined: null } });
+				// Fallback: SPQR detect full image
+				try {
+					console.log('📸 Attempting SPQR detection on full image...');
+					const spqrResult = detectSPQR(imageData);
+					if (spqrResult) {
+						console.log('✅ SPQR detection succeeded');
+						displayScanResult({ standard: null, spqr: spqrResult });
+					} else {
+						console.log('❌ SPQR detection returned null');
+						displayScanResult({ standard: null, spqr: { base: null, red: null, combined: null } });
+					}
+				} catch (error) {
+					console.error('❌ SPQR detection threw error:', error);
+					console.error('Stack:', error.stack);
+					displayScanResult({ standard: null, spqr: { base: `Error: ${error.message}`, red: null, combined: null } });
 				}
-			} catch (error) {
-				console.error('❌ SPQR detection threw error:', error);
-				console.error('Stack:', error.stack);
-				displayScanResult({ standard: null, spqr: { base: `Error: ${error.message}`, red: null, combined: null } });
+			} finally {
+				if (window.__SPQR_DECODE_SOURCE === 'file') {
+					window.__SPQR_DECODE_SOURCE = null;
+				}
 			}
 		};
 		img.onerror = function() { alert('Error loading image file'); };
@@ -3039,44 +3304,57 @@ function detectSPQR(imageData) {
 			try {
 				const cmy = sampleCMYRGBFinderPalette(data, width, height, modulePx, modules, originX, originY);
 				if (cmy && cmy.W && cmy.R && cmy.G && cmy.Y && cmy.K && cmy.M && cmy.C && cmy.B) {
-					console.log('   CMYRGB palette sampled:', JSON.stringify(cmy, null, 2));
-					const dist = (a,b)=>Math.hypot(a.r-b.r,a.g-b.g,a.b-b.b);
-					// Distinctiveness in TL 2x2 (W,R,G,Y) and TR 2x2 (K,M,C,B)
-					const tlDists = [dist(cmy.W,cmy.R), dist(cmy.W,cmy.G), dist(cmy.W,cmy.Y), dist(cmy.R,cmy.G), dist(cmy.R,cmy.Y), dist(cmy.G,cmy.Y)];
-					const trDists = [dist(cmy.K,cmy.M), dist(cmy.K,cmy.C), dist(cmy.K,cmy.B), dist(cmy.M,cmy.C), dist(cmy.M,cmy.B), dist(cmy.C,cmy.B)];
-					// For degraded images, use lower threshold (30px instead of 50px) and require fewer pairs (2 instead of 3)
-					const threshold = 30;
-					const tlDistinct = tlDists.filter(d=>d>threshold).length;
-					const trDistinct = trDists.filter(d=>d>threshold).length;
-					const totalDistinct = tlDistinct + trDistinct;
-					console.log(`  CMYRGB palette probe: TL ${tlDistinct}/6 > ${threshold}, TR ${trDistinct}/6 > ${threshold}`);
-					if ((tlDistinct >= 2 && trDistinct >= 2) || trDistinct >= 3 || totalDistinct >= 5) {
-						console.log('CMYRGB (8-color, 3-layer) SPQR detected via palette probe');
-						window.currentGridHint = savedGridHint || { modules, modulePx, originX, originY };
-						const paletteForDecode = cmy;
-						if (paletteForDecode) {
-							paletteForDecode._fromCamera = true;
-							window.cameraCalibrationCMY = paletteForDecode;
-						}
-						const cmyResult = decodeCMYRGBLayers(imageData);
-						if (cmyResult && (cmyResult.base || cmyResult.red || cmyResult.green)) {
-							return cmyResult;
-						}
-						console.log('   ⚠️  CMYRGB decode failed after palette probe, continuing with fallback');
+					const cmyHue = validateCmyFinderPalette(cmy);
+					if (!cmyHue.ok) {
+						const passed = Object.entries(cmyHue.passes).filter(([,v])=>v).map(([k])=>k).join(', ') || 'none';
+						console.log(`   ⚠️  CMY palette failed hue validation (passes: ${passed})`);
+						window.cameraCalibrationCMY = null;
 					} else {
-						console.log(`   ⚠️  Not enough distinctiveness for CMYRGB (need 2+2 or 3+0 or 5+0, got ${tlDistinct}+${trDistinct}), trying BWRG...`);
+ 						console.log('   CMYRGB palette sampled:', JSON.stringify(cmy, null, 2));
+ 						const dist = (a,b)=>Math.hypot(a.r-b.r,a.g-b.g,a.b-b.b);
+ 						// Distinctiveness in TL 2x2 (W,R,G,Y) and TR 2x2 (K,M,C,B)
+ 						const tlDists = [dist(cmy.W,cmy.R), dist(cmy.W,cmy.G), dist(cmy.W,cmy.Y), dist(cmy.R,cmy.G), dist(cmy.R,cmy.Y), dist(cmy.G,cmy.Y)];
+ 						const trDists = [dist(cmy.K,cmy.M), dist(cmy.K,cmy.C), dist(cmy.K,cmy.B), dist(cmy.M,cmy.C), dist(cmy.M,cmy.B), dist(cmy.C,cmy.B)];
+ 						// For degraded images, use lower threshold (30px instead of 50px) and require fewer pairs (2 instead of 3)
+ 						const threshold = 30;
+ 						const tlDistinct = tlDists.filter(d=>d>threshold).length;
+ 						const trDistinct = trDists.filter(d=>d>threshold).length;
+ 						const totalDistinct = tlDistinct + trDistinct;
+ 						console.log(`  CMYRGB palette probe: TL ${tlDistinct}/6 > ${threshold}, TR ${trDistinct}/6 > ${threshold}`);
+ 						if ((tlDistinct >= 2 && trDistinct >= 2) || trDistinct >= 3 || totalDistinct >= 5) {
+ 							console.log('CMYRGB (8-color, 3-layer) SPQR detected via palette probe');
+ 							const paletteForDecode = { ...cmy };
+ 							paletteForDecode._fromCamera = true;
+ 							window.currentGridHint = savedGridHint || { modules, modulePx, originX, originY };
+ 							window.cameraCalibrationCMY = paletteForDecode;
+ 							const cmyResult = decodeCMYRGBLayers(imageData);
+ 							if (cmyResult && (cmyResult.base || cmyResult.red || cmyResult.green)) {
+ 								return cmyResult;
+ 							}
+ 							console.log('   ⚠️  CMYRGB decode failed after palette probe, continuing with fallback');
+ 						} else {
+ 							console.log(`   ⚠️  Not enough distinctiveness for CMYRGB (need 2+2 or 3+0 or 5+0, got ${tlDistinct}+${trDistinct}), trying BWRG...`);
+ 						}
 					}
-				}
-			} catch (e) {
-				console.log('   ⚠️  CMYRGB palette sampling failed:', e.message);
-				// fallback to sampling below
-			}
-		}
+ 				}
+ 			} catch (e) {
+ 				console.log('   ⚠️  CMYRGB palette sampling failed:', e.message);
+ 				// fallback to sampling below
+ 			}
+		console.log('  🎯 Attempting BWRG decode with grid hint...');
+		if (savedGridHint) window.currentGridHint = savedGridHint;
+		const bwrgHintResult = decodeBWRGLayers(imageData);
+		window.currentGridHint = null;
+ 			if (bwrgHintResult && (bwrgHintResult.base || bwrgHintResult.red)) {
+ 				console.log('   ✅ BWRG decode succeeded with grid hint');
+ 				return bwrgHintResult;
+ 			}
+ 			console.log('   ⚠️ BWRG decode failed with grid hint, falling back to finder sampling...');
+ 			hasGridHint = false;
+ 			savedGridHint = null;
+ 		}
 		
-		console.log(`  After hasGridHint block, about to sample TL finder center...`);
-			
-		if (!hasGridHint) {
-			console.log(`  Sampling TL finder center for color detection...`);
+		console.log(`  Sampling TL finder center for color detection...`);
         
         // Sample the TL finder center (the 3×3 inner square of the finder)
         // BWRG: solid color in all 9 modules
@@ -3131,7 +3409,7 @@ function detectSPQR(imageData) {
         // because degraded images may lose color distinction
         console.log(`  Color clusters: ${JSON.stringify(clusters.map(c => ({r:c.r,g:c.g,b:c.b})))}`);
         
-        if (uniqueColors >= 2) {
+        if (uniqueColors >= 3) {
             // Try CMYRGB first - it will fall back if palette fails
             console.log(`🎨 Detected ${uniqueColors} colors, attempting CMYRGB (8-color, 3-layer) decode...`);
             if (savedGridHint) window.currentGridHint = savedGridHint;
@@ -3143,10 +3421,9 @@ function detectSPQR(imageData) {
             console.log('⚠️  CMYRGB decode failed, trying BWRG...');
             // Fall through to BWRG
         }
-        console.log('🎨 Attempting BWRG (4-color, 2-layer) decode...');
-        if (savedGridHint) window.currentGridHint = savedGridHint;
-        return decodeSPQRLayers(imageData);
-		}
+       console.log('🎨 Attempting BWRG (4-color, 2-layer) decode...');
+       if (savedGridHint) window.currentGridHint = savedGridHint;
+       return decodeBWRGLayers(imageData);
 		
 		console.log(`  Reached end of detectSPQR color detection`);
 		return null;
@@ -3195,7 +3472,7 @@ function decodeSPQRWithKnownGrid(data, width, height) {
         
         console.log(`Using grid: ${bestMatch.modules}x${bestMatch.modules}, ${bestMatch.modulePx}px/module`);
         
-        // Refine origin by maximising finder match
+        // Refine origin by maximising finder pattern score
         const origin = refineGridOrigin(data, width, height, bestMatch.modules, bestMatch.margin, bestMatch.modulePx);
         console.log(`Refined origin: (${origin.originX}, ${origin.originY})`);
         // Extract color layers using the determined grid and refined origin
@@ -3386,36 +3663,51 @@ function extractAndDecodeColorLayers(data, width, height, gridInfo) {
 
 function decodeLayerDirect(binaryLayer, layerName) {
     console.log(`Decoding ${layerName} layer (${binaryLayer.length}x${binaryLayer[0].length})...`);
-    
-    // Convert binary layer to RGBA for jsQR
+
     const modules = binaryLayer.length;
-    const quiet = 4; // quiet zone modules
-    const scale = 8; // Scale up for better jsQR performance
-    const outModules = modules + quiet * 2;
-    const scaledSize = outModules * scale;
-    const rgba = new Uint8ClampedArray(scaledSize * scaledSize * 4);
-    
-    for (let y = 0; y < scaledSize; y++) {
-        for (let x = 0; x < scaledSize; x++) {
-            const gx = Math.floor(x / scale) - quiet; // grid x in data modules
-            const gy = Math.floor(y / scale) - quiet; // grid y in data modules
-            let isDark = false;
-            if (gx >= 0 && gx < modules && gy >= 0 && gy < modules) {
-                isDark = binaryLayer[gy][gx];
-            } else {
-                isDark = false; // quiet zone
-            }
-            
-            const i = (y * scaledSize + x) * 4;
-            const value = isDark ? 0 : 255;
-            rgba[i] = rgba[i + 1] = rgba[i + 2] = value;
-            rgba[i + 3] = 255;
-        }
+    if (!modules) return null;
+
+    const ZXingLib = window.ZXing;
+    if (!ZXingLib) {
+        console.warn(`${layerName} layer decode error: ZXing library not available`);
+        return null;
     }
-    
-    const result = jsQR(rgba, scaledSize, scaledSize);
-    console.log(`${layerName} layer result:`, result ? `"${result.data}"` : 'null');
-    return result ? result.data : null;
+
+    try {
+        // Render boolean module grid to an off-screen canvas for ZXing consumption
+        const margin = 4;
+        const cell = Math.max(6, Math.min(16, Math.floor(320 / modules))); // keep canvas reasonably sized
+        const size = (modules + margin * 2) * cell;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) throw new Error('Canvas 2D context unavailable');
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, size, size);
+        ctx.fillStyle = '#000000';
+        for (let y = 0; y < modules; y++) {
+            const row = binaryLayer[y];
+            for (let x = 0; x < modules; x++) {
+                if (row[x]) {
+                    ctx.fillRect((x + margin) * cell, (y + margin) * cell, cell, cell);
+                }
+            }
+        }
+
+        const luminance = new ZXingLib.HTMLCanvasElementLuminanceSource(canvas);
+        const binarizer = new ZXingLib.HybridBinarizer(luminance);
+        const bitmap = new ZXingLib.BinaryBitmap(binarizer);
+        const reader = new ZXingLib.QRCodeReader();
+        const result = reader.decode(bitmap);
+        const text = result?.getText?.();
+        console.log(`${layerName} layer result:`, text ? `"${text}"` : 'null');
+        return text || null;
+    } catch (e) {
+        console.log(`${layerName} layer decode error:`, e && e.message ? e.message : e);
+        return null;
+    }
 }
 // Enforce standard finder patterns (7x7) at TL, TR, BL in the binary module grid
 function enforceFindersOnBinary(binary) {
@@ -3442,7 +3734,6 @@ function enforceFindersOnBinary(binary) {
     // BL
     drawFinderAt(0, modules - 7);
 }
-
 // Enforce timing patterns (alternating dark/light) on row 6 and column 6
 function enforceTimingPatterns(binary) {
     const n = binary.length;
@@ -3459,7 +3750,6 @@ function enforceTimingPatterns(binary) {
         binary[y][6] = ((y % 2) === 0);
     }
 }
-
 // Simple majority filter over 8-neighbourhood to reduce salt-and-pepper noise
 function majorityFilterInPlace(binary) {
     const n = binary.length;
@@ -3711,6 +4001,221 @@ function decodeSPQRLayersSimple(imageData) {
             debugImages: []
         };
     }
+}
+
+function decodeBWRGLayers(imageData) {
+	const { data, width, height } = imageData;
+	try {
+		console.log('🔍 SPQR 4-colour (BWRG) decoder starting:', `${width}×${height}px`);
+		
+		const bwrgPalette = window.bwrgColors || ['#ffffff', '#ff0000', '#00ff00', '#000000'];
+		const hexToRgb = (hex) => {
+			const r = parseInt(hex.slice(1, 3), 16);
+			const g = parseInt(hex.slice(3, 5), 16);
+			const b = parseInt(hex.slice(5, 7), 16);
+			return { r, g, b };
+		};
+		const paletteRgb = {
+			W: hexToRgb(bwrgPalette[0]),
+			R: hexToRgb(bwrgPalette[1]),
+			G: hexToRgb(bwrgPalette[2]),
+			K: hexToRgb(bwrgPalette[3])
+		};
+		
+		console.log('   Using color palette:', window.bwrgColors ? 'CUSTOM' : 'DEFAULT');
+		
+		let margin = 4;
+		let modules, modulePx, originX, originY;
+		
+		if (window.currentGridHint && window.currentGridHint.modules && window.currentGridHint.modulePx) {
+			modules = window.currentGridHint.modules;
+			modulePx = window.currentGridHint.modulePx;
+			originX = window.currentGridHint.originX || (margin * modulePx);
+			originY = window.currentGridHint.originY || (margin * modulePx);
+			margin = Math.round(originX / modulePx);
+			console.log(`   Grid (hint): ${modules}×${modules} modules, ${modulePx}px per module, origin=(${originX},${originY})`);
+			window.currentGridHint = null;
+		} else {
+			let bestModules = 21;
+			let bestModulePx = width / (21 + 2 * margin);
+			let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
+			const candidates = [];
+			
+			for (let testModules = 21; testModules <= 177; testModules += 4) {
+				const testModulePx = width / (testModules + 2 * margin);
+				const roundedModulePx = Math.round(testModulePx);
+				if (roundedModulePx < 2) continue;
+				const remainder = Math.abs(testModulePx - roundedModulePx);
+				if (remainder < 0.3) {
+					candidates.push({ modules: testModules, modulePx: roundedModulePx, remainder });
+				}
+				if (remainder < bestRemainder) {
+					bestRemainder = remainder;
+					bestModulePx = testModulePx;
+					bestModules = testModules;
+				}
+			}
+			
+			modules = bestModules;
+			modulePx = Math.round(bestModulePx);
+			
+			if (candidates.length) {
+				candidates.sort((a, b) => {
+					if (a.modulePx === 5 && b.modulePx !== 5) return -1;
+					if (a.modulePx !== 5 && b.modulePx === 5) return 1;
+					return a.remainder - b.remainder;
+				});
+				modules = candidates[0].modules;
+				modulePx = candidates[0].modulePx;
+			}
+			
+			originX = margin * modulePx;
+			originY = margin * modulePx;
+			console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module`);
+		}
+		
+		const classifyColour = (r, g, b) => {
+			const isWhite = r > 215 && g > 215 && b > 215;
+			const isBlack = r < 60 && g < 60 && b < 60;
+			if (isWhite) return 'W';
+			if (isBlack) return 'K';
+			const redScore = r - Math.max(g, b);
+			const greenScore = g - Math.max(r, b);
+			if (redScore > 35) return 'R';
+			if (greenScore > 35) return 'G';
+			const distances = [
+				{ key: 'W', dist: Math.hypot(r - paletteRgb.W.r, g - paletteRgb.W.g, b - paletteRgb.W.b) },
+				{ key: 'R', dist: Math.hypot(r - paletteRgb.R.r, g - paletteRgb.R.g, b - paletteRgb.R.b) },
+				{ key: 'G', dist: Math.hypot(r - paletteRgb.G.r, g - paletteRgb.G.g, b - paletteRgb.G.b) },
+				{ key: 'K', dist: Math.hypot(r - paletteRgb.K.r, g - paletteRgb.K.g, b - paletteRgb.K.b) }
+			];
+			distances.sort((a, b) => a.dist - b.dist);
+			return distances[0].key;
+		};
+		
+	const baseMods = [];
+	const redMods = [];
+	const colourCounts = { W: 0, R: 0, G: 0, K: 0 };
+	
+	console.log(`   🔍 About to extract ${modules}×${modules} modules from image`);
+	for (let my = 0; my < modules; my++) {
+			const baseRow = [];
+			const redRow = [];
+			for (let mx = 0; mx < modules; mx++) {
+				const cx = Math.round(originX + (mx + 0.5) * modulePx);
+				const cy = Math.round(originY + (my + 0.5) * modulePx);
+				const votes = {};
+				for (let dy = -1; dy <= 1; dy++) {
+					for (let dx = -1; dx <= 1; dx++) {
+						const px = Math.max(0, Math.min(width - 1, cx + dx));
+						const py = Math.max(0, Math.min(height - 1, cy + dy));
+						const idx = (py * width + px) * 4;
+						const colour = classifyColour(data[idx], data[idx + 1], data[idx + 2]);
+						votes[colour] = (votes[colour] || 0) + 1;
+					}
+				}
+				const chosen = Object.keys(votes).reduce((a, b) => votes[a] >= votes[b] ? a : b);
+				colourCounts[chosen] = (colourCounts[chosen] || 0) + 1;
+				
+				// BWRG mapping: Base = Black OR Green, Red = Red OR Green
+				switch (chosen) {
+					case 'K':
+						baseRow.push(true);
+						redRow.push(false);
+						break;
+					case 'R':
+						baseRow.push(false);
+						redRow.push(true);
+						break;
+					case 'G':
+						baseRow.push(true);
+						redRow.push(true);
+						break;
+					default:
+						baseRow.push(false);
+						redRow.push(false);
+				}
+			}
+			baseMods.push(baseRow);
+			redMods.push(redRow);
+		}
+		
+	console.log('   Colour distribution:', colourCounts);
+	
+	// Debug: log first row before processing
+	const baseRowStr = baseMods[0].map(b => b ? '█' : '·').join('');
+	const redRowStr = redMods[0].map(b => b ? '█' : '·').join('');
+	console.log('   Base row 0 (raw):', baseRowStr);
+	console.log('   Red  row 0 (raw):', redRowStr);
+	
+	// NOTE: Do NOT enforce finders/timing on color-extracted layers!
+	// The enforcement would make both layers identical, losing the color information.
+	// Only apply light filtering to clean up noise.
+	majorityFilterInPlace(baseMods);
+	majorityFilterInPlace(redMods);
+	
+	// Debug: log first row after processing
+	const baseRowStr2 = baseMods[0].map(b => b ? '█' : '·').join('');
+	const redRowStr2 = redMods[0].map(b => b ? '█' : '·').join('');
+	console.log('   Base row 0 (processed):', baseRowStr2);
+	console.log('   Red  row 0 (processed):', redRowStr2);
+	if (typeof window !== 'undefined') {
+		window.__spqrDecodedBWRG = {
+			baseMods: baseMods.map(row => row.slice()),
+			redMods: redMods.map(row => row.slice()),
+			rawBaseRow: baseRowStr,
+			rawRedRow: redRowStr,
+			filteredBaseRow: baseRowStr2,
+			filteredRedRow: redRowStr2,
+			modules,
+			modulePx,
+			originX,
+			originY,
+			margin
+		};
+	}
+	
+	const baseText = decodeLayerDirect(baseMods, 'base');
+	const redText = decodeLayerDirect(redMods, 'red');
+		
+		let combined = null;
+		if (baseText || redText) {
+			combined = `${baseText || ''}${redText || ''}`;
+		}
+		
+		if (!baseText && !redText) {
+			console.log('   ⚡ Attempting inversion fallback for BWRG layers...');
+			const invert = (mods) => mods.map(row => row.map(bit => !bit));
+			const invBase = decodeLayerDirect(invert(baseMods), 'base (inverted)');
+			const invRed = decodeLayerDirect(invert(redMods), 'red (inverted)');
+			if (invBase || invRed) {
+				return {
+					base: invBase,
+					red: invRed,
+					combined: `${invBase || ''}${invRed || ''}` || null,
+					layerType: 'BWRG',
+					mode: 'BWRG'
+				};
+			}
+		}
+		
+		return {
+			base: baseText,
+			red: redText,
+			combined,
+			layerType: 'BWRG',
+			mode: 'BWRG'
+		};
+	} catch (error) {
+		console.error('❌ BWRG decode error:', error);
+		return {
+			base: null,
+			red: null,
+			combined: null,
+			layerType: 'BWRG',
+			mode: 'BWRG'
+		};
+	}
 }
 
 // Create binary matrix from image data using a predicate function
@@ -4093,7 +4598,6 @@ function addSyntheticFinders(binary, width, height, qrLocation) {
         drawFinderPattern(binary, width, height, pos.x, pos.y, gridModulePx);
     }
 }
-
 // Draw a standard 7x7 QR finder pattern at the specified position
 function drawFinderPattern(binary, width, height, startX, startY, modulePx) {
     // Standard QR finder pattern: 7x7 grid with 1:1:3:1:1 structure
@@ -4148,346 +4652,6 @@ function decodeQRData(extracted) {
         return null;
     }
 }
-// The internal decoder functions have been removed.
-// We now use jsQR directly for SPQR layer decoding.
-
-function decodeSPQRLayers(imageData) {
-    const { data, width, height } = imageData;
-    try {
-		console.log('🔍 SPQR 4-colour decoder starting:', `${width}×${height}px`);
-		
-		// Get active color palette (custom or default)
-		const palette = window.bwrgColors || ['#ffffff', '#ff0000', '#00ff00', '#000000'];
-		
-		// Convert hex colors to RGB
-		const hexToRgb = (hex) => {
-			const r = parseInt(hex.slice(1, 3), 16);
-			const g = parseInt(hex.slice(3, 5), 16);
-			const b = parseInt(hex.slice(5, 7), 16);
-			return { r, g, b };
-		};
-		
-		let paletteRgb = {
-			'W': hexToRgb(palette[0]), // White
-			'R': hexToRgb(palette[1]), // Red
-			'G': hexToRgb(palette[2]), // Green
-			'K': hexToRgb(palette[3])  // Black
-		};
-		// Use camera calibration if available
-		if (window.cameraCalibration && window.cameraCalibration.type === 'BWRG' && window.cameraCalibration.samples) {
-			const s = window.cameraCalibration.samples;
-			paletteRgb = {
-				'W': paletteRgb.W,
-				'R': s.red || paletteRgb.R,
-				'G': s.green || paletteRgb.G,
-				'K': s.black || paletteRgb.K
-			};
-		}
-		
-		console.log('   Using color palette:', window.bwrgColors ? 'CUSTOM' : (window.cameraCalibration ? 'CAMERA-CALIBRATED' : 'DEFAULT'));
-		if (window.cameraCalibration) {
-			console.log('   Calibrated:', { 
-				R: `rgb(${Math.round(paletteRgb.R.r)},${Math.round(paletteRgb.R.g)},${Math.round(paletteRgb.R.b)})`,
-				G: `rgb(${Math.round(paletteRgb.G.r)},${Math.round(paletteRgb.G.g)},${Math.round(paletteRgb.G.b)})`,
-				K: `rgb(${Math.round(paletteRgb.K.r)},${Math.round(paletteRgb.K.g)},${Math.round(paletteRgb.K.b)})`
-			});
-		}
-		
-		// Step 1: Classify pixels using improved color matching for lighting tolerance
-		const classifyPixel = (r, g, b) => {
-			const brightness = Math.max(r, g, b);
-			const minBright = Math.min(r, g, b);
-			if (brightness > 230 && minBright > 200) return 'W';
-			if (brightness < 60) return 'K';
-			let minDist = Infinity;
-			let bestColor = 'W';
-			for (const [colorName, rgb] of Object.entries(paletteRgb)) {
-				const paletteBright = Math.max(rgb.r, rgb.g, rgb.b) || 1;
-				const pixelBright = brightness || 1;
-				const distR = Math.pow((r / pixelBright) - (rgb.r / paletteBright), 2);
-				const distG = Math.pow((g / pixelBright) - (rgb.g / paletteBright), 2);
-				const distB = Math.pow((b / pixelBright) - (rgb.b / paletteBright), 2);
-				const dist = Math.sqrt(distR + distG + distB);
-				if (dist < minDist) { minDist = dist; bestColor = colorName; }
-			}
-			return bestColor;
-		};
-		
-		// Step 2: Detect grid structure from image dimensions (prefer camera hint)
-		let margin = 4;
-		let modules, modulePx, originX, originY;
-		if (window.currentGridHint && window.currentGridHint.modules && window.currentGridHint.modulePx) {
-			modules = window.currentGridHint.modules;
-			modulePx = window.currentGridHint.modulePx;
-			originX = window.currentGridHint.originX || (margin * modulePx);
-			originY = window.currentGridHint.originY || (margin * modulePx);
-			margin = Math.round(originX / modulePx); // Recalculate margin from origin
-			console.log(`   Grid (hint): ${modules}×${modules} modules, ${modulePx}px per module, origin=(${originX},${originY})`);
-			// Clear hint after using
-			window.currentGridHint = null;
-		} else {
-			let bestModules = 21;
-			let bestModulePx = width / (21 + 2 * margin);
-			let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
-			const candidates = [];
-			for (let testModules = 21; testModules <= 177; testModules += 4) {
-				const testModulePx = width / (testModules + 2 * margin);
-				const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
-				const roundedModulePx = Math.round(testModulePx);
-				if (roundedModulePx < 2) continue;
-				if (testRemainder < 0.3) {
-					candidates.push({ modules: testModules, modulePx: roundedModulePx, remainder: testRemainder });
-				}
-				if (testRemainder < bestRemainder) { bestRemainder = testRemainder; bestModulePx = testModulePx; bestModules = testModules; }
-			}
-			modules = bestModules; modulePx = Math.round(bestModulePx);
-			if (candidates.length > 0) {
-				candidates.sort((a,b)=>{
-					const aStd = (a.modulePx===5||a.modulePx===6), bStd=(b.modulePx===5||b.modulePx===6);
-					if (aStd && !bStd) return -1; if (!aStd && bStd) return 1; return a.remainder - b.remainder;
-				});
-				modules = candidates[0].modules; modulePx = candidates[0].modulePx;
-			}
-			originX = margin * modulePx;
-			originY = margin * modulePx;
-			console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module`);
-		}
-		
-		// Step 3: Sample each QR module and build binary layers
-		// In BWRG SPQR: BLACK → base layer, RED → red layer, GREEN → both layers
-		const baseMods = [];
-		const redMods = [];
-		
-		for (let my = 0; my < modules; my++) {
-			const baseRow = [];
-			const redRow = [];
-			
-			for (let mx = 0; mx < modules; mx++) {
-				// Sample from centre of module (using origin offset)
-				const cx = Math.round(originX + (mx + 0.5) * modulePx);
-				const cy = Math.round(originY + (my + 0.5) * modulePx);
-				
-				// Sample 3×3 pixels around centre for robustness
-				const samples = [];
-				const rgbSamples = []; // Debug: keep RGB values
-				for (let dy = -1; dy <= 1; dy++) {
-					for (let dx = -1; dx <= 1; dx++) {
-						const px = Math.max(0, Math.min(width - 1, cx + dx));
-						const py = Math.max(0, Math.min(height - 1, cy + dy));
-						const idx = (py * width + px) * 4;
-						const r = data[idx], g = data[idx + 1], b = data[idx + 2];
-						const colour = classifyPixel(r, g, b);
-						samples.push(colour);
-						if (my === 0 && mx < 5) { // Debug first 5 modules of row 0
-							rgbSamples.push({ rgb: `(${r},${g},${b})`, class: colour });
-						}
-					}
-				}
-				
-				// Majority vote on colour
-				const colourCounts = {};
-				samples.forEach(c => colourCounts[c] = (colourCounts[c] || 0) + 1);
-				const moduleColour = Object.keys(colourCounts).reduce((a, b) => 
-					colourCounts[a] > colourCounts[b] ? a : b
-				);
-				
-				// Debug first few modules
-				if (my === 0 && mx < 5) {
-					console.log(`   Module [${my},${mx}]:`, { center: `(${cx},${cy})`, samples: samples.join(''), counts: colourCounts, final: moduleColour });
-				}
-				
-			// Map colour to layer bits
-			// WHITE (00): base=light, red=light
-			// RED   (01): base=light, red=dark
-			// GREEN (11): base=dark,  red=dark  (overlap)
-			// BLACK (10): base=dark,  red=light
-			const baseIsDark = (moduleColour === 'K' || moduleColour === 'G');
-			const redIsDark = (moduleColour === 'R' || moduleColour === 'G');
-			
-			baseRow.push(baseIsDark);
-			redRow.push(redIsDark);
-			
-			// Debug: also try inverted mapping
-			if (my === 0 && mx < 10) {
-				const baseInv = !baseIsDark;
-				const redInv = !redIsDark;
-				if (mx === 0) console.log('   Trying inverted mapping for comparison...');
-			}
-			}
-			
-			baseMods.push(baseRow);
-			redMods.push(redRow);
-		}
-		
-		console.log('   Base layer row 0 (raw):', baseMods[0].map(b => b ? '█' : '·').join(''));
-		console.log('   Red  layer row 0 (raw):', redMods[0].map(b => b ? '█' : '·').join(''));
-		
-		// Step 3.5: Enforce finder and alignment patterns on BOTH layers
-		// Get alignment pattern positions for a given QR version
-		const getAlignmentPatternPositions = (version) => {
-			if (version === 1) return [];
-			// Alignment pattern center positions by version (from QR spec)
-			const positions = [
-				[], // Version 1
-				[6, 18], [6, 22], [6, 26], [6, 30], [6, 34], // Versions 2-6
-				[6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50], [6, 30, 54], [6, 32, 58], [6, 34, 62], // Versions 7-13
-				[6, 26, 46, 66], [6, 26, 48, 70], [6, 26, 50, 74], [6, 30, 54, 78], [6, 30, 56, 82], [6, 30, 58, 86], [6, 34, 62, 90], // Versions 14-20
-				[6, 28, 50, 72, 94], [6, 26, 50, 74, 98], [6, 30, 54, 78, 102], [6, 28, 54, 80, 106], [6, 32, 58, 84, 110], [6, 30, 58, 86, 114], [6, 34, 62, 90, 118], // Versions 21-27
-				[6, 26, 50, 74, 98, 122], [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130], [6, 30, 56, 82, 108, 134], [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142], [6, 34, 62, 90, 118, 146], // Versions 28-34
-				[6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154], [6, 28, 54, 80, 106, 132, 158], [6, 32, 58, 84, 110, 136, 162], [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170] // Versions 35-40
-			];
-			return positions[version - 1] || [];
-		};
-		
-		const enforceFinders = (mods) => {
-			const version = 1 + (modules - 21) / 4;
-			
-			// Draw finder patterns (7x7)
-			const drawFinder = (ox, oy) => {
-				for (let dy = 0; dy < 7; dy++) {
-					for (let dx = 0; dx < 7; dx++) {
-						const onBorder = (dx === 0 || dx === 6 || dy === 0 || dy === 6);
-						const inCenter = (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
-						const xx = ox + dx;
-						const yy = oy + dy;
-						if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
-							mods[yy][xx] = onBorder || inCenter;
-						}
-					}
-				}
-			};
-			drawFinder(0, 0);
-			drawFinder(modules - 7, 0);
-			drawFinder(0, modules - 7);
-			
-			// Draw alignment patterns (5x5)
-			const drawAlignment = (cx, cy) => {
-				for (let dy = -2; dy <= 2; dy++) {
-					for (let dx = -2; dx <= 2; dx++) {
-						const onBorder = (Math.abs(dx) === 2 || Math.abs(dy) === 2);
-						const inCenter = (dx === 0 && dy === 0);
-						const xx = cx + dx;
-						const yy = cy + dy;
-						if (yy >= 0 && yy < modules && xx >= 0 && xx < modules) {
-							mods[yy][xx] = onBorder || inCenter;
-						}
-					}
-				}
-			};
-			
-			const alignmentPos = getAlignmentPatternPositions(version);
-			const inFinder = (x, y) => {
-				return (x < 9 && y < 9) || (x >= modules - 9 && y < 9) || (x < 9 && y >= modules - 9);
-			};
-			
-			// Draw alignment patterns at all position combinations, except where finders are
-			for (let i = 0; i < alignmentPos.length; i++) {
-				for (let j = 0; j < alignmentPos.length; j++) {
-					const x = alignmentPos[j];
-					const y = alignmentPos[i];
-					// Skip if overlaps with finder pattern
-					if (!inFinder(x, y)) {
-						drawAlignment(x, y);
-					}
-				}
-			}
-			
-			// Draw timing patterns
-			for (let x = 0; x < modules; x++) {
-				if (!inFinder(x, 6)) mods[6][x] = (x % 2) === 0;
-			}
-			for (let y = 0; y < modules; y++) {
-				if (!inFinder(6, y)) mods[y][6] = (y % 2) === 0;
-			}
-		};
-		// Keep copies before enforcement for comparison
-		const baseModsRaw = baseMods.map(row => [...row]);
-		const redModsRaw = redMods.map(row => [...row]);
-		enforceFinders(baseMods);
-		enforceFinders(redMods);
-		
-		console.log('   Base layer row 0 (raw  ):', baseModsRaw[0].map(b => b ? '█' : '·').join(''));
-		console.log('   Base layer row 0 (fixed):', baseMods[0].map(b => b ? '█' : '·').join(''));
-		console.log('   Red  layer row 0 (raw  ):', redModsRaw[0].map(b => b ? '█' : '·').join(''));
-		console.log('   Red  layer row 0 (fixed):', redMods[0].map(b => b ? '█' : '·').join(''));
-		
-		// Step 4: Use jsQR to decode each layer
-		const decodeLayer = (mods, layerName) => {
-			if (typeof window.decodeMatrixGuessMask === 'function') {
-				try {
-					const coreRes = decodeMatrixGuessMaskBrowser(mods);
-					if (coreRes && coreRes.text) {
-						console.log(`   ✅ ${layerName} (decoderCore mask=${coreRes.mask ?? 'n/a'}) → "${coreRes.text}"`);
-						return coreRes.text;
-					}
-				} catch (err) {
-					console.log(`   ⚠️  decoderCore failed for ${layerName}: ${err.message}`);
-				}
-			}
-			// Scale up for jsQR (now has alignment patterns so moderate scale is fine)
-			const scale = 8;
-			const scaledSize = modules * scale;
-			const rgba = new Uint8ClampedArray(scaledSize * scaledSize * 4);
-			
-			for (let y = 0; y < scaledSize; y++) {
-				for (let x = 0; x < scaledSize; x++) {
-					const my = Math.floor(y / scale);
-					const mx = Math.floor(x / scale);
-					const isDark = mods[my][mx];
-					
-					const idx = (y * scaledSize + x) * 4;
-					const val = isDark ? 0 : 255;
-					rgba[idx] = rgba[idx + 1] = rgba[idx + 2] = val;
-					rgba[idx + 3] = 255;
-				}
-			}
-			
-		// Try multiple decoding strategies for maximum tolerance
-		let result = jsQR(rgba, scaledSize, scaledSize, { inversionAttempts: "attemptBoth" });
-		if (result) {
-			console.log(`   ✅ ${layerName} decoded: "${result.data}"`);
-			return result.data;
-		}
-		
-		// For short text (likely just "SPQR"), try without enforcing patterns
-		console.log(`   ⚠️  ${layerName} initial decode failed, trying without pattern enforcement...`);
-		return null;
-		};
-		
-		let baseText = decodeLayer(baseMods, 'Base layer');
-		let redText = decodeLayer(redMods, 'Red layer');
-		
-		// If enforcement failed, try raw data (for short text like "SPQR", raw might work better)
-		if (!baseText) {
-			console.log('   Retrying base layer without pattern enforcement...');
-			baseText = decodeLayer(baseModsRaw, 'Base layer (raw)');
-		}
-		if (!redText) {
-			console.log('   Retrying red layer without pattern enforcement...');
-			redText = decodeLayer(redModsRaw, 'Red layer (raw)');
-		}
-		
-		const combined = (baseText || '') + (redText || '');
-		
-		return {
-			base: baseText,
-			red: redText,
-			combined: combined || null,
-			partial: combined ? null : 'Decode failed',
-			mode: 'BWRG',
-			layerType: 'BWRG'
-		};
-		
-	} catch (error) {
-		console.error('❌ SPQR decode error:', error);
-		return {
-			base: null,
-			red: null,
-			combined: null,
-			partial: 'Error: ' + error.message
-		};
-	}
-}
 // CMYRGB (8-color) SPQR decoder for 3-layer codes
 function decodeCMYRGBLayers(imageData) {
 	const { data, width, height } = imageData;
@@ -4516,45 +4680,82 @@ function decodeCMYRGBLayers(imageData) {
 		'B': hexToRgb(palette[7])  // Blue
 	};
 		
-		// Prefer camera-derived calibration ONLY if from actual camera (not file upload)
-		// File uploads should use default/custom palette as they're already clean
-		const fromCamera = window.cameraCalibrationCMY && window.cameraCalibrationCMY._fromCamera;
-		if (fromCamera) {
-			console.log('   Using camera-calibrated CMYRGB palette:', JSON.stringify(window.cameraCalibrationCMY, null, 2));
-			Object.assign(paletteRgb, window.cameraCalibrationCMY);
-		} else {
-			console.log('   Using color palette:', window.cmyrgbColors ? 'CUSTOM' : 'DEFAULT');
-			console.log('   Palette values:', JSON.stringify(paletteRgb, null, 2));
+	const paletteKeys = ['W','R','G','Y','K','M','C','B'];
+	const calibration = window.cameraCalibrationCMY;
+	const calibrationUsable = calibration && calibration._separation >= DEFAULT_COLOUR_SEPARATION_THRESHOLD;
+	const calibrationSource = calibrationUsable ? (calibration._source || (calibration._fromCamera ? 'camera' : 'unknown')) : null;
+	const fromCamera = calibrationUsable && calibration._fromCamera;
+		
+	if (calibrationUsable) {
+		for (const key of paletteKeys) {
+			if (calibration[key]) {
+				paletteRgb[key] = calibration[key];
+			}
 		}
+		console.log(`   Using ${calibrationSource}-calibrated CMYRGB palette (separation=${calibration._separation.toFixed(1)})`);
+	} else {
+		console.log('   Using color palette:', window.cmyrgbColors ? 'CUSTOM' : 'DEFAULT');
+		console.log('   Palette values:', JSON.stringify(paletteRgb, null, 2));
+	}
 		
 		// Step 1: Classify pixels using improved color matching for lighting tolerance
-	const useCalibrated = window.cameraCalibrationCMY && window.cameraCalibrationCMY._fromCamera;
-	const cameraClassifier = useCalibrated ? createCameraCMYClassifier(paletteRgb) : null;
-	if (cameraClassifier) {
-		const separationValue = Number.isFinite(cameraClassifier.separation) ? Number(cameraClassifier.separation.toFixed(3)) : cameraClassifier.separation;
-		console.log('   📐 CMY camera classifier ready:', {
-			separation: separationValue,
-			C: { threshold: Number(cameraClassifier.configs.c.threshold.toFixed(3)), sep: Number(cameraClassifier.configs.c.separation.toFixed(3)), polarity: cameraClassifier.configs.c.polarity },
-			M: { threshold: Number(cameraClassifier.configs.m.threshold.toFixed(3)), sep: Number(cameraClassifier.configs.m.separation.toFixed(3)), polarity: cameraClassifier.configs.m.polarity },
-			Y: { threshold: Number(cameraClassifier.configs.y.threshold.toFixed(3)), sep: Number(cameraClassifier.configs.y.separation.toFixed(3)), polarity: cameraClassifier.configs.y.polarity }
-		});
-		if (separationValue !== null && separationValue !== undefined && separationValue < 0.08) {
-			console.log('   ⚠️  CMY colour separation is weak; blending distance and bit thresholds.');
-		}
-		window.lastCameraCMYClassifier = {
-			stats: cameraClassifier.stats,
-			configs: cameraClassifier.configs,
-			separation: cameraClassifier.separation
-		};
-	} else {
-		window.lastCameraCMYClassifier = null;
-	}
-	const classifyPixel = (r, g, b) => {
+		const useCalibrated = calibrationUsable;
+		const cameraClassifier = fromCamera ? createCameraCMYClassifier(paletteRgb) : null;
 		if (cameraClassifier) {
-			return cameraClassifier.classify(r, g, b);
+			const separationValue = Number.isFinite(cameraClassifier.separation) ? Number(cameraClassifier.separation.toFixed(3)) : cameraClassifier.separation;
+			console.log('   📐 CMY camera classifier ready:', {
+				separation: separationValue,
+				C: { threshold: Number(cameraClassifier.configs.c.threshold.toFixed(3)), sep: Number(cameraClassifier.configs.c.separation.toFixed(3)), polarity: cameraClassifier.configs.c.polarity },
+				M: { threshold: Number(cameraClassifier.configs.m.threshold.toFixed(3)), sep: Number(cameraClassifier.configs.m.separation.toFixed(3)), polarity: cameraClassifier.configs.m.polarity },
+				Y: { threshold: Number(cameraClassifier.configs.y.threshold.toFixed(3)), sep: Number(cameraClassifier.configs.y.separation.toFixed(3)), polarity: cameraClassifier.configs.y.polarity }
+			});
+			if (separationValue !== null && separationValue !== undefined && separationValue < 0.08) {
+				console.log('   ⚠️  CMY colour separation is weak; blending distance and bit thresholds.');
+			}
+			window.lastCameraCMYClassifier = {
+				stats: cameraClassifier.stats,
+				configs: cameraClassifier.configs,
+				separation: cameraClassifier.separation
+			};
+		} else {
+			window.lastCameraCMYClassifier = null;
 		}
+		const classifyPixel = (r, g, b) => {
+			if (cameraClassifier) {
+				return cameraClassifier.classify(r, g, b);
+			}
 
-		if (useCalibrated) {
+			if (useCalibrated) {
+				let minDist = Infinity;
+				let bestColor = 'W';
+				for (const [colorName, rgb] of Object.entries(paletteRgb)) {
+					if (!rgb || typeof rgb.r !== 'number') continue;
+					const dist = Math.hypot(r - rgb.r, g - rgb.g, b - rgb.b);
+					if (dist < minDist) {
+						minDist = dist;
+						bestColor = colorName;
+					}
+				}
+				return bestColor;
+			}
+
+			// Heuristic classification for generated codes
+			const hasR = r > 200;
+			const hasG = g > 200;
+			const hasB = b > 200;
+			const noR = r < 100;
+			const noG = g < 100;
+			const noB = b < 100;
+			
+			if (hasR && hasG && hasB) return 'W'; // White: all on
+			if (noR && noG && noB) return 'K';     // Black: all off
+			if (noR && hasG && hasB) return 'C';   // Cyan: G+B, no R
+			if (hasR && noG && hasB) return 'M';   // Magenta: R+B, no G
+			if (hasR && hasG && noB) return 'Y';   // Yellow: R+G, no B
+			if (hasR && noG && noB) return 'R';    // Red: R only
+			if (noR && hasG && noB) return 'G';    // Green: G only
+			if (noR && noG && hasB) return 'B';    // Blue: B only
+
 			let minDist = Infinity;
 			let bestColor = 'W';
 			for (const [colorName, rgb] of Object.entries(paletteRgb)) {
@@ -4566,37 +4767,7 @@ function decodeCMYRGBLayers(imageData) {
 				}
 			}
 			return bestColor;
-		}
-
-		// Heuristic classification for generated codes
-		const hasR = r > 200;
-		const hasG = g > 200;
-		const hasB = b > 200;
-		const noR = r < 100;
-		const noG = g < 100;
-		const noB = b < 100;
-		
-		if (hasR && hasG && hasB) return 'W'; // White: all on
-		if (noR && noG && noB) return 'K';     // Black: all off
-		if (noR && hasG && hasB) return 'C';   // Cyan: G+B, no R
-		if (hasR && noG && hasB) return 'M';   // Magenta: R+B, no G
-		if (hasR && hasG && noB) return 'Y';   // Yellow: R+G, no B
-		if (hasR && noG && noB) return 'R';    // Red: R only
-		if (noR && hasG && noB) return 'G';    // Green: G only
-		if (noR && noG && hasB) return 'B';    // Blue: B only
-
-		let minDist = Infinity;
-		let bestColor = 'W';
-		for (const [colorName, rgb] of Object.entries(paletteRgb)) {
-			if (!rgb || typeof rgb.r !== 'number') continue;
-			const dist = Math.hypot(r - rgb.r, g - rgb.g, b - rgb.b);
-			if (dist < minDist) {
-				minDist = dist;
-				bestColor = colorName;
-			}
-		}
-		return bestColor;
-	};
+		};
 	
 	// Step 2: Detect grid structure (prefer camera/ROI hint)
 	let margin = 4;
@@ -4627,23 +4798,23 @@ function decodeCMYRGBLayers(imageData) {
 			
 			// Skip if pixels per module would be too small (< 2px)
 			if (roundedModulePx < 2) continue;
-		
-		// Collect candidates with good fit
-		if (testRemainder < 0.3) {
-			candidates.push({
-				modules: testModules,
-				modulePx: testModulePx,
-				remainder: testRemainder,
-				roundedPx: roundedModulePx
-			});
-		}
-		
-		// Also track overall best
-		if (testRemainder < bestRemainder) {
-			bestRemainder = testRemainder;
-			bestModulePx = testModulePx;
-			bestModules = testModules;
-		}
+			
+			// Collect candidates with good fit
+			if (testRemainder < 0.3) {
+				candidates.push({
+					modules: testModules,
+					modulePx: testModulePx,
+					remainder: testRemainder,
+					roundedPx: roundedModulePx
+				});
+			}
+			
+			// Also track overall best
+			if (testRemainder < bestRemainder) {
+				bestRemainder = testRemainder;
+				bestModulePx = testModulePx;
+				bestModules = testModules;
+			}
 		}
 		
 		// If we have multiple good candidates, prefer smaller module counts
@@ -4693,13 +4864,19 @@ function decodeCMYRGBLayers(imageData) {
 				
 				// Sample 3×3 for robustness
 				const samples = [];
+				const rgbSamples = [];
+				const shouldLogDebug = (my === 0 && mx < 5) || (my === Math.floor(modules / 2) && mx < 5);
 				for (let dy = -1; dy <= 1; dy++) {
 					for (let dx = -1; dx <= 1; dx++) {
 						const px = Math.max(0, Math.min(width - 1, cx + dx));
 						const py = Math.max(0, Math.min(height - 1, cy + dy));
 						const idx = (py * width + px) * 4;
-						const color = classifyPixel(data[idx], data[idx + 1], data[idx + 2]);
-						samples.push(color);
+						const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+						const colour = classifyPixel(r, g, b);
+						samples.push(colour);
+						if (shouldLogDebug) {
+							rgbSamples.push({ rgb: `(${r},${g},${b})`, class: colour });
+						}
 					}
 				}
 				
@@ -4721,6 +4898,13 @@ function decodeCMYRGBLayers(imageData) {
 				baseRow.push(bBit);
 				greenRow.push(gBit);
 				redRow.push(rBit);
+				
+				// Debug for first row and middle row
+				if (shouldLogDebug) {
+					const rgbDetail = rgbSamples.map(({ rgb, class: cls }) => `${rgb}:${cls}`).join(' ');
+					console.log(`   Module [${my},${mx}]:`, { center: `(${cx},${cy})`, samples: samples.join(''), counts: colorCounts, final: majorityColor, rgbDetail });
+					console.log('      RGB samples:', JSON.stringify(rgbSamples));
+				}
 			}
 			
 			baseMods.push(baseRow);
@@ -4863,15 +5047,18 @@ function decodeCMYRGBLayers(imageData) {
 		if (typeof window.decodeMatrixGuessMask === 'function') {
 			try {
 				const coreRes = decodeMatrixGuessMaskBrowser(mods);
-				if (coreRes && coreRes.text) {
-					console.log(`   ✅ ${layerName} (decoderCore mask=${coreRes.mask ?? 'n/a'}) → "${coreRes.text}"`);
-					return buildResult(coreRes.text, {
-						source: 'decoderCore',
-						scale: null,
-						version: coreRes.version,
-						eccLevel: null,
-						maskPattern: coreRes.mask ?? null
-					});
+				if (coreRes && typeof coreRes.text === 'string') {
+					if (coreRes.text.length === 0 || isLikelyPrintableAscii(coreRes.text)) {
+						console.log(`   ✅ ${layerName} (decoderCore mask=${coreRes.mask ?? 'n/a'}) → "${describeDecodedText(coreRes.text)}"`);
+						return buildResult(coreRes.text, {
+							source: 'decoderCore',
+							scale: null,
+							version: coreRes.version,
+							eccLevel: null,
+							maskPattern: coreRes.mask ?? null
+						});
+					}
+					console.warn(`   ⚠️ ${layerName} (decoderCore mask=${coreRes.mask ?? 'n/a'}) produced suspicious text "${describeDecodedText(coreRes.text)}" - retrying with jsQR fallback`);
 				}
 			} catch (err) {
 				console.log(`   ⚠️  decoderCore failed for ${layerName}: ${err.message}`);
@@ -4898,18 +5085,21 @@ function decodeCMYRGBLayers(imageData) {
 			
 			// Try jsQR first (fast)
 			const jsqrResult = jsQR(rgba, scaledSize, scaledSize, { inversionAttempts: "attemptBoth" });
-			if (jsqrResult && jsqrResult.data) {
-				const binaryData = jsqrResult.binaryData ? new Uint8Array(jsqrResult.binaryData) : null;
-				console.log(`   ✅ ${layerName} (jsQR @ ${scale}px): "${jsqrResult.data}"`);
-				return buildResult(jsqrResult.data, {
-					source: 'jsQR',
-					scale,
-					version: jsqrResult.version || jsqrResult.versionNumber,
-					eccLevel: jsqrResult.eccLevel || jsqrResult.errorCorrectionLevel,
-					binary: binaryData,
-					maskPattern: jsqrResult.maskPattern,
-					chunks: jsqrResult.chunks
-				});
+			if (jsqrResult && typeof jsqrResult.data === 'string') {
+				if (jsqrResult.data.length === 0 || isLikelyPrintableAscii(jsqrResult.data)) {
+					const binaryData = jsqrResult.binaryData ? new Uint8Array(jsqrResult.binaryData) : null;
+					console.log(`   ✅ ${layerName} (jsQR @ ${scale}px): "${describeDecodedText(jsqrResult.data)}"`);
+					return buildResult(jsqrResult.data, {
+						source: 'jsQR',
+						scale,
+						version: jsqrResult.version || jsqrResult.versionNumber,
+						eccLevel: jsqrResult.eccLevel || jsqrResult.errorCorrectionLevel,
+						binary: binaryData,
+						maskPattern: jsqrResult.maskPattern,
+						chunks: jsqrResult.chunks
+					});
+				}
+				console.warn(`   ⚠️ ${layerName} (jsQR @ ${scale}px) produced suspicious text "${describeDecodedText(jsqrResult.data)}" - ignoring`);
 			}
 			
 			// Try ZXing if available (more robust)
@@ -4926,12 +5116,13 @@ function decodeCMYRGBLayers(imageData) {
 						)
 					);
 					const reader = new ZXing.QRCodeReader();
-					const zxingResult = reader.decode(binaryBitmap);
-					if (zxingResult && typeof zxingResult.getText === 'function') {
-						const text = zxingResult.getText();
+				const zxingResult = reader.decode(binaryBitmap);
+				if (zxingResult && typeof zxingResult.getText === 'function') {
+					const text = zxingResult.getText();
+					if (typeof text === 'string' && (text.length === 0 || isLikelyPrintableAscii(text))) {
 						const raw = typeof zxingResult.getRawBytes === 'function' ? zxingResult.getRawBytes() : null;
 						const binary = raw ? new Uint8Array(raw) : null;
-						console.log(`   ✅ ${layerName} (ZXing @ ${scale}px): "${text}"`);
+						console.log(`   ✅ ${layerName} (ZXing @ ${scale}px): "${describeDecodedText(text)}"`);
 						return buildResult(text, {
 							source: 'ZXing',
 							scale,
@@ -4940,6 +5131,8 @@ function decodeCMYRGBLayers(imageData) {
 							binary
 						});
 					}
+					console.warn(`   ⚠️ ${layerName} (ZXing @ ${scale}px) produced suspicious text "${describeDecodedText(text)}" - ignoring`);
+				}
 				} catch (e) {
 					// ZXing failed, continue to next scale
 				}
@@ -5330,7 +5523,6 @@ if (!baseText && !greenText && !redText) {
 function handleScannedCode(data) {
     displayScanResult({ standard: data, spqr: null });
 }
-
 function displayScanResult(result) {
 	const scanResultDiv = document.getElementById('scanResult');
 	const progressPanel = document.getElementById('scan-progress');
@@ -5421,7 +5613,7 @@ function displayScanResult(result) {
 		progressSegments.push(`<div style="margin-top: 8px; font-size: 15px;">${badgeParts.join('')}</div>`);
 		progressSegments.push(`<div style="margin-top: 4px; color: #ddd; font-size: 14px;">Locked: ${successCount} of ${layerCount} layers</div>`);
 		
-		// Block progress if multi-frame aggregation is active
+		// Block progress if multi-frame aggregator is active
 		if (parityAggregator.progress) {
 			const prog = parityAggregator.progress;
 			const chunkParts = [];
@@ -5582,7 +5774,6 @@ async function fillTextBox(text) {
         resultDiv.scrollIntoView({ behavior: 'smooth' });
     }
 }
-
 async function autoGenerateVariants(text) {
     if (!text.trim()) return;
     
@@ -5672,6 +5863,30 @@ function enforceFunctionPatternsModules(mods) {
     for (let y = 0; y < n; y++) if (!inFinder(6, y)) mods[y][6] = (y % 2) === 0;
 }
 
+function isLikelyPrintableAscii(text) {
+    if (typeof text !== 'string') return false;
+    if (text.length === 0) return true;
+    let printable = 0;
+    for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        if (code === 9 || code === 10 || code === 13 || (code >= 32 && code <= 126)) {
+            printable++;
+        }
+    }
+    const ratio = printable / text.length;
+    if (ratio < 0.85) return false;
+    const stripped = text.replace(/[\s]/g, '');
+    return stripped.length > 0;
+}
+
+function describeDecodedText(text, maxLength = 80) {
+    if (text == null) return '';
+    if (text.length === 0) return '(empty)';
+    const cleaned = text.replace(/[^\x20-\x7E]/g, '?').replace(/\s+/g, ' ').trim();
+    if (!cleaned.length) return '(non-printable)';
+    return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength - 1)}…` : cleaned;
+}
+
 function decodeMatrixGuessMaskBrowser(mods) {
     try {
         return decodeMatrixGuessMask(matrixFromModules(mods));
@@ -5743,6 +5958,7 @@ async function testSPQRRoundTrip() {
 			
 			// Try to decode
 			console.log('4. Attempting decode...');
+			window.__SPQR_DECODE_SOURCE = 'file';
         const decoded = detectSPQR(imageData);
 			
 			if (!decoded) {
@@ -5920,7 +6136,6 @@ function reconstructQRLayer(bits, layer) {
     // Convert bits to bytes
     return bitsToBytes(layerBits);
 }
-
 // Helper function to convert bits to bytes (LSB first)
 function bitsToBytes(bits) {
     const bytes = [];
@@ -5933,7 +6148,6 @@ function bitsToBytes(bits) {
     }
     return bytes;
 }
-
 // Decode QR code bytes (assumes byte mode)
 function decodeQRBytes(bytes) {
     if (bytes.length < 4) return null;

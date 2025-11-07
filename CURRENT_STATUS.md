@@ -4,13 +4,19 @@
 
 ### Recent Changes
 
-1. **Responsive Large QR Codes with Corner Markers (2025-11-03o)**:
+1. **Responsive Large QR Codes with Corner Markers (2025-11-03s)**:
    - **Much larger QR codes**: Desktop uses 9-10px per module (was 5-6px), mobile uses 11-12px for optimal scanning.
    - **Responsive display**: QR codes now fill their containers (max 450px desktop, 95vw mobile) with proper aspect ratio maintained.
    - **L-shaped corner brackets** on SPQR codes extend to canvas edges, can touch any background (30% thickness, 1.8× quiet-zone arms).
    - **Standard QR codes remain plain** (no corners) for spec compliance, labelled "Standard QR".
    - **Enhanced corner detection**: `detectCornerMarkers` traces from exact canvas corners, `locateQRStructure` prioritises this before finder patterns.
    - Centered variant cards (max 600px) create clean, scannable presentation on all devices.
+
+2. **Layer Classification & Grid-Hint Fallbacks (2025-11-03s)**:
+   - CMYRGB finder sampling now only triggers when **≥3** distinct colours are detected in the TL finder (prevents 2-layer BWRG from being misclassified).
+   - When a grid hint is present, the decoder now **tries BWRG immediately** if CMYRGB palette probes fail, before falling back to heuristic sampling.
+   - Grid hints are cleared after the directed decode attempt to avoid polluting subsequent heuristics.
+   - Added console logging for the grid-hint BWRG path (`🎯` and `✅/⚠️` markers) to aid regression tracking.
 
 1. **Improved Layer Detection (2025-11-01a)**:
    - Made CMYRGB detection more aggressive: now tries CMYRGB first if ≥2 distinct colours detected in finder center (was ≥3)
