@@ -1,5 +1,5 @@
 {
-	"name": "spqr-code",
+	"name": "@rotwang9000/spqr-code",
 	"version": "1.0.0",
 	"description": "Stacked Polychromatic QR: 2-3 ordinary QR codes in the red, green and blue channels of one image, for bigger modules at the same data size. Encoder, decoder and CLI.",
 	"keywords": ["qr", "qrcode", "qr-code", "colour", "color", "rgb", "barcode", "scanner", "decoder", "encoder", "spqr"],

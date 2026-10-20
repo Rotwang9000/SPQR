@@ -2,7 +2,7 @@
 
 - **Make codes:** https://rotwang9000.github.io/SPQR/
 - **Scan codes (phone):** https://rotwang9000.github.io/SPQR/scan/
-- **Library and CLI:** `npm install spqr-code`
+- **Library and CLI:** `npm install @rotwang9000/spqr-code`
 
 SPQR stacks two or three ordinary QR codes into one colour image, one per RGB channel. Each layer carries only half or a third of the message, so it can use a smaller QR version: fewer, bigger squares for the same data. That means a code can be printed or shown smaller, or scanned from further away.
 
@@ -60,11 +60,11 @@ The site is static: no build, no CDN, and nothing leaves the browser.
 ## Library
 
 ```bash
-npm install spqr-code
+npm install @rotwang9000/spqr-code
 ```
 
 ```js
-import { encode, toSvg, toRgba, decode, createAggregator } from 'spqr-code';
+import { encode, toSvg, toRgba, decode, createAggregator } from '@rotwang9000/spqr-code';
 
 const code = encode('hello', { layers: 3, ecc: 'M' }); // layers 1-3, ecc L/M/Q/H
 const svg = toSvg(code, { modulePx: 8 });               // or toRgba() for raw pixels
@@ -78,16 +78,16 @@ For a live camera, feed frames to `createAggregator().push(frame)`. It remembers
 The package ships TypeScript types. It's ESM, and `require()` works on Node 22 and later. Its two dependencies are [jsQR](https://github.com/cozmo/jsQR) and [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator). If you already load those yourself (for example as browser globals), import the bare core instead:
 
 ```js
-import { createSpqr } from 'spqr-code/core';
+import { createSpqr } from '@rotwang9000/spqr-code/core';
 const spqr = createSpqr({ qrcode: window.qrcode, jsQR: window.jsQR });
 ```
 
 ### CLI
 
 ```bash
-npx spqr-code encode "https://example.com" -l 3 -o code.svg   # -e L|M|Q|H, -m modulePx, .png needs sharp
-npx spqr-code encode -i message.txt > code.svg
-npx spqr-code decode photo.jpg                                 # needs: npm install sharp
+npx @rotwang9000/spqr-code encode "https://example.com" -l 3 -o code.svg   # -e L|M|Q|H, -m modulePx, .png needs sharp
+npx @rotwang9000/spqr-code encode -i message.txt > code.svg
+npx @rotwang9000/spqr-code decode photo.jpg                                 # needs: npm install sharp
 ```
 
 ## Development
