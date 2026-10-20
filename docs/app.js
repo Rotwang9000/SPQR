@@ -188,6 +188,10 @@ async function startCamera() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
+    // Log version for debugging
+    const APP_VERSION = '2025-11-11-v1762546700';
+    console.log(`%c🔷 SPQR App ${APP_VERSION}`, 'font-size: 14px; font-weight: bold; color: #0088ff;');
+    
     // Check if required libraries are available
     if (typeof jsQR === 'undefined') {
         console.error('jsQR library failed to load!');
@@ -405,6 +409,16 @@ async function generateSpqrClient(text, options) {
 
 	const modules = baseQr.getModuleCount();
 	const margin = 4;
+	
+	// Use larger module sizes for better visibility and scanning
+	// Responsive sizing based on viewport
+	const baseSize = isEightColour ? 10 : 9;
+	const isMobile = window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
+	const cell = isMobile ? baseSize + 2 : baseSize; // Slightly larger on mobile
+	const totalModules = modules + 2 * margin;
+	const width = totalModules * cell;
+	const height = width;
+	
 	const meta = {
 		mode: ecMode,
 		palette: colours,
@@ -415,7 +429,11 @@ async function generateSpqrClient(text, options) {
 		baseBytes: baseText.length,
 		redBytes: redText.length,
 		greenBytes: greenText ? greenText.length : 0,
-		parityBytes: parityText ? parityText.length : 0
+		parityBytes: parityText ? parityText.length : 0,
+		cell: cell,
+		margin: margin,
+		width: width,
+		height: height
 	};
 	window.__lastSpqrMeta = meta;
 	if (!Array.isArray(window.__spqrMetaHistory)) {
@@ -425,15 +443,6 @@ async function generateSpqrClient(text, options) {
 	if (window.__spqrMetaHistory.length > 12) {
 		window.__spqrMetaHistory.shift();
 	}
-
-	// Use larger module sizes for better visibility and scanning
-	// Responsive sizing based on viewport
-	const baseSize = isEightColour ? 10 : 9;
-	const isMobile = window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
-	const cell = isMobile ? baseSize + 2 : baseSize; // Slightly larger on mobile
-	const totalModules = modules + 2 * margin;
-	const width = totalModules * cell;
-	const height = width;
 
 	// Helper to query a module (qrcode-generator uses isDark(row, col))
 	const dark = (qr, x, y) => (qr ? qr.isDark(y, x) : false);
@@ -1176,16 +1185,10 @@ function estimateGrid(mask, width, height) {
 function locateQRStructure(data, width, height) {
     console.log(`locateQRStructure: ${width}x${height} image`);
 	
-	// First, try to detect L-shaped corner markers if present (from our generated codes)
-	const cornerMarkers = detectCornerMarkers(data, width, height);
-	if (cornerMarkers && cornerMarkers.length >= 3) {
-		console.log(`   📐 Detected ${cornerMarkers.length} corner markers, using for grid estimation`);
-		const grid = gridFromCornerMarkers(cornerMarkers, width, height);
-		if (grid) {
-			console.log(`   ✨ Grid from corner markers: ${grid.qrModules}×${grid.qrModules}, ${grid.modulePx}px/module, origin=(${grid.originX},${grid.originY})`);
-			return grid;
-		}
-	}
+	// Corner marker detection is disabled - it's unreliable for file uploads
+	// The decorative corner brackets are only partially detected (2/4) in most cases
+	// and can interfere with accurate grid detection. We rely on finder-based detection
+	// with the snap-to-grid correction which is more robust.
 	
 	// Brightness-based classification for finder detection
 	// ONLY consider truly BLACK pixels as "dark" for finder detection
@@ -1345,7 +1348,7 @@ function locateQRStructure(data, width, height) {
 	}
 
 	if (selected.length < 3) {
-		console.log(`⚠️  Found only ${finders.length} finder clusters, need 3`);
+		console.log(`⚠️  Found only ${selected.length} finder clusters, need 3`);
 		return null;
 	}
 
@@ -1380,7 +1383,7 @@ function locateQRStructure(data, width, height) {
 	const minModulePx = Math.max(2, modulePxMean * 0.4);
 	const maxModulePx = modulePxMean * 2.5;
 	for (let v = 1; v <= 40; v++) {
-		const modulesCandidate = 17 + 4 * (v - 1);
+		const modulesCandidate = 21 + 4 * (v - 1);
 		const modulePxCandidate = avgDist / (modulesCandidate - 7);
 		if (!Number.isFinite(modulePxCandidate)) continue;
 		if (modulePxCandidate < minModulePx || modulePxCandidate > maxModulePx) continue;
@@ -1403,8 +1406,8 @@ function locateQRStructure(data, width, height) {
 		// Fallback to previous heuristic if scoring failed
 		modulePx = modulePxMean;
 		qrModules = Math.round(avgDist / modulePx) + 7;
-		version = Math.ceil(Math.max(0, (qrModules - 17)) / 4);
-		qrModules = Math.max(21, version * 4 + 17);
+		version = Math.ceil(Math.max(0, (qrModules - 21)) / 4);
+		qrModules = Math.max(21, version * 4 + 21);
 		modulePx = avgDist / (qrModules - 7);
 	}
 
@@ -1417,9 +1420,33 @@ function locateQRStructure(data, width, height) {
 	let originX = Math.round(TL.x - 3.5 * modulePx);
 	let originY = Math.round(TL.y - 3.5 * modulePx);
 	
-	// Refine origin by scanning for the actual top-left corner of the quiet zone
-	// Look for transition from white (outside) to black (finder ring start)
-	const searchRadius = Math.round(modulePx * 2);
+	// For generated SPQR codes, the origin should be exactly at 4 * modulePx
+	// The finder detection is often inaccurate due to anti-aliasing and image processing
+	// Calculate expected origin based on detected module size
+	const expectedMargin = 4; // SPQR standard
+	const expectedOriginX = Math.round(expectedMargin * modulePx);
+	const expectedOriginY = Math.round(expectedMargin * modulePx);
+	
+	// If detected origin is close to a clean multiple of modulePx, snap to it
+	// This helps with rounding errors while not being overly aggressive
+	if (Math.abs(originX - expectedOriginX) < modulePx * 1.5 && Math.abs(originY - expectedOriginY) < modulePx * 1.5) {
+		// Also snap modulePx to nearest integer if it's close
+		const roundedModulePx = Math.round(modulePx);
+		if (Math.abs(modulePx - roundedModulePx) < 0.5) {
+			const correctedOriginX = expectedMargin * roundedModulePx;
+			const correctedOriginY = expectedMargin * roundedModulePx;
+			if (originX !== correctedOriginX || originY !== correctedOriginY || modulePx !== roundedModulePx) {
+				console.log(`   🔧 Snapping grid: origin (${originX},${originY})→(${correctedOriginX},${correctedOriginY}), modulePx ${modulePx.toFixed(2)}→${roundedModulePx}`);
+				originX = correctedOriginX;
+				originY = correctedOriginY;
+				modulePx = roundedModulePx;
+			}
+		}
+	}
+	
+	// For SPQR codes, the initial calculation is usually accurate
+	// Only do light refinement to handle slight misalignment
+	const searchRadius = Math.min(5, Math.round(modulePx * 0.5)); // Smaller search radius
 	let bestOriginX = originX;
 	let bestOriginY = originY;
 	let bestScore = -Infinity;
@@ -1430,37 +1457,24 @@ function locateQRStructure(data, width, height) {
 			const testY = originY + dy;
 			if (testX < 0 || testY < 0) continue;
 			
-			// Score based on: white pixels in quiet zone, black pixels in finder ring
+			// Score based on: finder ring structure (more reliable than quiet zone which has corner markers)
+			// Only check the outer black ring - inner square may be colored in SPQR codes
 			let score = 0;
-			// Sample quiet zone (should be white)
-			for (let qy = 0; qy < 4; qy++) {
-				for (let qx = 0; qx < 4; qx++) {
-					const px = Math.round(testX + (qx + 0.5) * modulePx);
-					const py = Math.round(testY + (qy + 0.5) * modulePx);
-					if (px >= 0 && px < width && py >= 0 && py < height) {
-						const i = (py * width + px) * 4;
-						const r = data[i], g = data[i+1], b = data[i+2];
-						const isWhite = r > 200 && g > 200 && b > 200;
-						if (isWhite) score += 1;
-					}
-				}
-			}
-			// Sample finder ring (should be black)
-			for (let fy = 4; fy < 11; fy++) {
-				for (let fx = 4; fx < 11; fx++) {
-					// Only check the outer ring (not the colored center)
-					const inRing = (fx === 4 || fx === 10 || fy === 4 || fy === 10) ||
-					               (fx >= 5 && fx <= 9 && fy >= 5 && fy <= 9 && (fx === 5 || fx === 9 || fy === 5 || fy === 9));
-					if (inRing) {
-						const px = Math.round(testX + (fx + 0.5) * modulePx);
-						const py = Math.round(testY + (fy + 0.5) * modulePx);
-						if (px >= 0 && px < width && py >= 0 && py < height) {
-							const i = (py * width + px) * 4;
-							const r = data[i], g = data[i+1], b = data[i+2];
-							const isBlack = r < 80 && g < 80 && b < 80;
-							if (isBlack) score += 2; // Weight black ring detection more
-						}
-					}
+			// Sample finder ring outer border (modules 4 and 10 on edges) - these are always black
+			const borderSamples = [
+				[4,4], [5,4], [6,4], [7,4], [8,4], [9,4], [10,4], // top edge
+				[4,10], [5,10], [6,10], [7,10], [8,10], [9,10], [10,10], // bottom edge
+				[4,5], [4,6], [4,7], [4,8], [4,9], // left edge
+				[10,5], [10,6], [10,7], [10,8], [10,9] // right edge
+			];
+			for (const [fx, fy] of borderSamples) {
+				const px = Math.round(testX + (fx + 0.5) * modulePx);
+				const py = Math.round(testY + (fy + 0.5) * modulePx);
+				if (px >= 0 && px < width && py >= 0 && py < height) {
+					const i = (py * width + px) * 4;
+					const r = data[i], g = data[i+1], b = data[i+2];
+					const isBlack = r < 80 && g < 80 && b < 80;
+					if (isBlack) score += 1;
 				}
 			}
 			
@@ -1472,8 +1486,76 @@ function locateQRStructure(data, width, height) {
 		}
 	}
 	
-	originX = bestOriginX;
-	originY = bestOriginY;
+	// Try to refine origin using known margin (4 modules for SPQR codes)
+	// The origin should be at margin * modulePx from the canvas edge
+	// But we don't know the exact edge, so use the finder position as reference
+	// TL finder center is at (originX + 3.5*modulePx, originY + 3.5*modulePx)
+	// So originX = TL.x - 3.5*modulePx (already calculated above)
+	// For SPQR, margin is typically 4 modules, so we can verify:
+	// originX should be approximately 4 * modulePx from the left edge
+	
+	// Check if we can find the actual canvas edge by looking for the corner marker
+	// Corner markers extend from (0,0) inward, so scan from the actual edges
+	let edgeX = 0, edgeY = 0;
+	const searchEdge = Math.min(60, Math.round(modulePx * 6));
+	// Scan horizontally from left edge at y=0 (top of image)
+	for (let x = 0; x < searchEdge; x++) {
+		const i = (0 * width + x) * 4;
+		const r = data[i], g = data[i+1], b = data[i+2];
+		if (r < 80 && g < 80 && b < 80) { // Found black (corner marker)
+			edgeX = x;
+			break;
+		}
+	}
+	// Scan vertically from top edge at x=0 (left of image)
+	for (let y = 0; y < searchEdge; y++) {
+		const i = (y * width + 0) * 4;
+		const r = data[i], g = data[i+1], b = data[i+2];
+		if (r < 80 && g < 80 && b < 80) { // Found black (corner marker)
+			edgeY = y;
+			break;
+		}
+	}
+	
+	// If we found edges, calculate expected origin from margin
+	if (edgeX > 0 || edgeY > 0) {
+		const expectedOriginX = edgeX + 4 * modulePx; // margin = 4 modules
+		const expectedOriginY = edgeY + 4 * modulePx;
+		const currentDiffX = Math.abs(originX - expectedOriginX);
+		const currentDiffY = Math.abs(originY - expectedOriginY);
+		
+		// If current origin is far from expected, use expected (but verify with finder ring check)
+		if (currentDiffX > modulePx || currentDiffY > modulePx) {
+			// Verify expected origin by checking finder ring
+			let verifyScore = 0;
+			const verifySamples = [[4,4], [4,10], [10,4], [10,10], [5,4], [6,4], [7,4], [8,4], [9,4]];
+			for (const [fx, fy] of verifySamples) {
+				const px = Math.round(expectedOriginX + (fx + 0.5) * modulePx);
+				const py = Math.round(expectedOriginY + (fy + 0.5) * modulePx);
+				if (px >= 0 && px < width && py >= 0 && py < height) {
+					const i = (py * width + px) * 4;
+					const r = data[i], g = data[i+1], b = data[i+2];
+					if (r < 80 && g < 80 && b < 80) verifyScore++;
+				}
+			}
+			if (verifyScore >= 5) { // At least 5 black pixels in finder ring
+				originX = Math.round(expectedOriginX);
+				originY = Math.round(expectedOriginY);
+				console.log(`   ✅ Origin corrected from finder-based (${Math.round(TL.x - 3.5*modulePx)},${Math.round(TL.y - 3.5*modulePx)}) to margin-based (${originX},${originY}) [verify score=${verifyScore}]`);
+			}
+		}
+	}
+	
+	// Also try the refinement if it's good
+	const originDiff = Math.abs(bestOriginX - originX) + Math.abs(bestOriginY - originY);
+	const minExpectedScore = 15; // At least 15 black pixels in finder ring
+	if (bestScore >= minExpectedScore && originDiff < modulePx * 1.5) { // Require good score and small adjustment
+		originX = bestOriginX;
+		originY = bestOriginY;
+		console.log(`   ✅ Origin refined: (${originX},${originY}) [diff=${originDiff.toFixed(1)}px]`);
+	} else if (bestScore < minExpectedScore) {
+		console.log(`   ⚠️  Origin refinement skipped: score=${bestScore} (need ${minExpectedScore}), diff=${originDiff.toFixed(1)}px (max ${(modulePx*1.5).toFixed(1)}px)`);
+	}
 	
 	console.log(`   Spacing: ${Math.round(avgDist)}px → ${qrModules} modules @ ${modulePx}px, origin=(${originX},${originY}) [refined, score=${bestScore}]`);
 	
@@ -3134,46 +3216,63 @@ async function handleFileUpload(e) {
 					displayScanResult({ standard: code.data, spqr: null });
 					return;
 				}
-				// Locate structure then crop + scale ROI
-				const grid = locateQRStructure(imageData.data, imageData.width, imageData.height);
-				if (grid) {
-					const roiResult = await decodeFromGridROI(imageData, grid, 8);
-				if (roiResult) {
-					if (roiResult.type === 'standard') {
-						displayScanResult({ standard: roiResult.text, spqr: null });
-					} else if (roiResult.spqr) {
-						const spqrPayload = {
-							...roiResult.spqr,
-							// Ensure combined string is set when layers are present
-							combined: roiResult.spqr.combined || ((roiResult.spqr.base || '') + (roiResult.spqr.red || '') + (roiResult.spqr.green || ''))
-						};
-						displayScanResult({ standard: null, spqr: spqrPayload });
-					} else {
-						displayScanResult({ standard: null, spqr: { base: null, red: null, combined: null } });
-					}
-						return;
-					}
-					// ROI decode failed - clear grid hint before trying full image
-					window.currentGridHint = null;
-					window.cameraCalibration = null;
-					window.cameraCalibrationCMY = null;
+			// Locate structure then crop + scale ROI
+			console.log(`📐 File upload: calling locateQRStructure on ${imageData.width}×${imageData.height}px image...`);
+			const grid = locateQRStructure(imageData.data, imageData.width, imageData.height);
+			if (grid) {
+				console.log(`✅ locateQRStructure succeeded: ${grid.qrModules}×${grid.qrModules} modules, ${grid.modulePx.toFixed(2)}px/module, origin=(${grid.originX},${grid.originY})`);
+				const roiResult = await decodeFromGridROI(imageData, grid, 8);
+			if (roiResult) {
+				console.log(`✅ decodeFromGridROI succeeded: type=${roiResult.type}`);
+				if (roiResult.type === 'standard') {
+					displayScanResult({ standard: roiResult.text, spqr: null });
+				} else if (roiResult.spqr) {
+					const spqrPayload = {
+						...roiResult.spqr,
+						// Ensure combined string is set when layers are present
+						combined: roiResult.spqr.combined || ((roiResult.spqr.base || '') + (roiResult.spqr.red || '') + (roiResult.spqr.green || ''))
+					};
+					displayScanResult({ standard: null, spqr: spqrPayload });
+				} else {
+					displayScanResult({ standard: null, spqr: { base: null, red: null, combined: null } });
 				}
-				// Fallback: SPQR detect full image
-				try {
-					console.log('📸 Attempting SPQR detection on full image...');
-					const spqrResult = detectSPQR(imageData);
-					if (spqrResult) {
-						console.log('✅ SPQR detection succeeded');
-						displayScanResult({ standard: null, spqr: spqrResult });
-					} else {
-						console.log('❌ SPQR detection returned null');
-						displayScanResult({ standard: null, spqr: { base: null, red: null, combined: null } });
-					}
-				} catch (error) {
-					console.error('❌ SPQR detection threw error:', error);
-					console.error('Stack:', error.stack);
-					displayScanResult({ standard: null, spqr: { base: `Error: ${error.message}`, red: null, combined: null } });
+					return;
+				} else {
+					console.log(`❌ decodeFromGridROI returned null, seeding grid hint for detectSPQR...`);
 				}
+				// ROI decode failed - seed grid hint for full-image detection using locate result
+				window.currentGridHint = {
+					modules: grid.qrModules,
+					modulePx: grid.modulePx,
+					originX: grid.originX,
+					originY: grid.originY
+				};
+				window.cameraCalibration = null;
+				window.cameraCalibrationCMY = null;
+				console.log(`   Seeded currentGridHint: ${window.currentGridHint.modules}×${window.currentGridHint.modules}, ${window.currentGridHint.modulePx.toFixed(2)}px/module`);
+			} else {
+				console.log(`❌ locateQRStructure returned null - no grid detected`);
+				// Clear any stale hints
+				window.currentGridHint = null;
+				window.cameraCalibration = null;
+				window.cameraCalibrationCMY = null;
+			}
+			// Fallback: SPQR detect full image
+			try {
+				console.log('📸 Attempting SPQR detection on full image...');
+				const spqrResult = detectSPQR(imageData);
+				if (spqrResult) {
+					console.log('✅ SPQR detection succeeded');
+					displayScanResult({ standard: null, spqr: spqrResult });
+				} else {
+					console.log('❌ SPQR detection returned null');
+					displayScanResult({ standard: null, spqr: { base: null, red: null, combined: null } });
+				}
+			} catch (error) {
+				console.error('❌ SPQR detection threw error:', error);
+				console.error('Stack:', error.stack);
+				displayScanResult({ standard: null, spqr: { base: `Error: ${error.message}`, red: null, combined: null } });
+			}
 			} finally {
 				if (window.__SPQR_DECODE_SOURCE === 'file') {
 					window.__SPQR_DECODE_SOURCE = null;
@@ -3237,61 +3336,84 @@ function detectSPQR(imageData) {
             return null;
         }
         
-        // Estimate grid parameters
-        margin = 4; // Standard margin
-        
-        // Find best grid match
-        let bestModules = 21;
-        let bestModulePx = width / (21 + 2 * margin);
-        let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
-        const candidates = [];
-        
-        for (let testModules = 21; testModules <= 177; testModules += 4) {
-            const testModulePx = width / (testModules + 2 * margin);
-            const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
-            const roundedModulePx = Math.round(testModulePx);
+        // Try to use locateQRStructure for accurate grid detection first
+        const structure = locateQRStructure(data, width, height);
+        if (structure && structure.qrModules && structure.modulePx) {
+            modules = structure.qrModules;
+            modulePx = structure.modulePx;
+            originX = structure.originX || (4 * modulePx);
+            originY = structure.originY || (4 * modulePx);
+            margin = Math.round(originX / modulePx);
+            console.log(`  Using locateQRStructure: ${modules}×${modules}, ${modulePx}px/module, origin=(${originX},${originY})`);
+            // Save the grid for decoders
+            savedGridHint = { modules, modulePx, originX, originY };
+        } else {
+            // Fallback to rough estimation
+            margin = 4; // Standard margin
             
-            if (roundedModulePx < 2) continue;
+            // Find best grid match
+            let bestModules = 21;
+            let bestModulePx = width / (21 + 2 * margin);
+            let bestRemainder = Math.abs(bestModulePx - Math.round(bestModulePx));
+            const candidates = [];
             
-            // More tolerant for camera images (0.3 instead of 0.2)
-            if (testRemainder < 0.3) {
-                candidates.push({
-                    modules: testModules,
-                    modulePx: roundedModulePx,
-                    remainder: testRemainder
+            for (let testModules = 21; testModules <= 177; testModules += 4) {
+                const testModulePx = width / (testModules + 2 * margin);
+                const testRemainder = Math.abs(testModulePx - Math.round(testModulePx));
+                const roundedModulePx = Math.round(testModulePx);
+                
+                if (roundedModulePx < 2) continue;
+                
+                // More tolerant for camera images (0.3 instead of 0.2)
+                if (testRemainder < 0.3) {
+                    candidates.push({
+                        modules: testModules,
+                        modulePx: roundedModulePx,
+                        remainder: testRemainder
+                    });
+                }
+                
+                if (testRemainder < bestRemainder) {
+                    bestRemainder = testRemainder;
+                    bestModulePx = testModulePx;
+                    bestModules = testModules;
+                }
+            }
+            
+            modules = bestModules;
+            modulePx = Math.round(bestModulePx);
+            
+            if (candidates.length > 0) {
+                candidates.sort((a, b) => {
+                    // Prioritise common QR versions (21, 25, 29, 33) first
+                    const commonSizes = [21, 25, 29, 33];
+                    const aIsCommon = commonSizes.includes(a.modules);
+                    const bIsCommon = commonSizes.includes(b.modules);
+                    if (aIsCommon && !bIsCommon) return -1;
+                    if (!aIsCommon && bIsCommon) return 1;
+                    
+                    // Then prioritise standard module sizes (5px for BWRG, 6px for CMYRGB)
+                    const aIsStandard = (a.modulePx === 5 || a.modulePx === 6);
+                    const bIsStandard = (b.modulePx === 5 || b.modulePx === 6);
+                    
+                    if (aIsStandard && !bIsStandard) return -1;
+                    if (!aIsStandard && bIsStandard) return 1;
+                    
+                    // Finally prefer smaller remainder (better fit)
+                    return a.remainder - b.remainder;
                 });
+                modules = candidates[0].modules;
+                modulePx = candidates[0].modulePx;
             }
             
-            if (testRemainder < bestRemainder) {
-                bestRemainder = testRemainder;
-                bestModulePx = testModulePx;
-                bestModules = testModules;
-            }
+            originX = margin * modulePx;
+            originY = margin * modulePx;
+            
+            console.log(`  Estimated grid (fallback): ${modules}×${modules}, ${modulePx}px/module`);
         }
         
-        modules = bestModules;
-        modulePx = Math.round(bestModulePx);
-        
-        if (candidates.length > 0) {
-            candidates.sort((a, b) => {
-                // Prioritise standard module sizes (5px for BWRG, 6px for CMYRGB)
-                const aIsStandard = (a.modulePx === 5 || a.modulePx === 6);
-                const bIsStandard = (b.modulePx === 5 || b.modulePx === 6);
-                
-                if (aIsStandard && !bIsStandard) return -1;
-                if (!aIsStandard && bIsStandard) return 1;
-                
-                // If both are standard, prefer exact fit (remainder=0) or smaller remainder
-                return a.remainder - b.remainder;
-            });
-            modules = candidates[0].modules;
-            modulePx = candidates[0].modulePx;
-        }
-        
-        originX = margin * modulePx;
-        originY = margin * modulePx;
-        
-        console.log(`  Estimated grid: ${modules}×${modules}, ${modulePx}px/module`);
+        // Save the estimated grid for decoders
+        savedGridHint = { modules, modulePx, originX, originY };
     }
     
     console.log(`  hasGridHint=${hasGridHint}, proceeding to color detection...`);
@@ -3487,7 +3609,6 @@ function decodeSPQRWithKnownGrid(data, width, height) {
         };
     }
 }
-
 function testGridStructure(data, width, height, modules, margin, modulePx) {
     // Test if this grid structure makes sense by checking color distribution
     let colorPixels = 0;
@@ -3634,10 +3755,6 @@ function extractAndDecodeColorLayers(data, width, height, gridInfo) {
         redLayer.push(redRow);
     }
     
-    // Denoise with majority filter to mitigate single-module misclassifications
-    majorityFilterInPlace(baseLayer);
-    majorityFilterInPlace(redLayer);
-    
     // Enforce standard finder patterns on both layers within the module grid
     enforceFindersOnBinary(baseLayer);
     enforceFindersOnBinary(redLayer);
@@ -3660,7 +3777,6 @@ function extractAndDecodeColorLayers(data, width, height, gridInfo) {
         combined: combined || 'No layers decoded successfully'
     };
 }
-
 function decodeLayerDirect(binaryLayer, layerName) {
     console.log(`Decoding ${layerName} layer (${binaryLayer.length}x${binaryLayer[0].length})...`);
 
@@ -3668,15 +3784,10 @@ function decodeLayerDirect(binaryLayer, layerName) {
     if (!modules) return null;
 
     const ZXingLib = window.ZXing;
-    if (!ZXingLib) {
-        console.warn(`${layerName} layer decode error: ZXing library not available`);
-        return null;
-    }
 
     try {
-        // Render boolean module grid to an off-screen canvas for ZXing consumption
         const margin = 4;
-        const cell = Math.max(6, Math.min(16, Math.floor(320 / modules))); // keep canvas reasonably sized
+        const cell = Math.max(6, Math.min(16, Math.floor(320 / modules)));
         const size = (modules + margin * 2) * cell;
         const canvas = document.createElement('canvas');
         canvas.width = size;
@@ -3696,13 +3807,66 @@ function decodeLayerDirect(binaryLayer, layerName) {
             }
         }
 
-        const luminance = new ZXingLib.HTMLCanvasElementLuminanceSource(canvas);
-        const binarizer = new ZXingLib.HybridBinarizer(luminance);
-        const bitmap = new ZXingLib.BinaryBitmap(binarizer);
-        const reader = new ZXingLib.QRCodeReader();
-        const result = reader.decode(bitmap);
-        const text = result?.getText?.();
-        console.log(`${layerName} layer result:`, text ? `"${text}"` : 'null');
+        const imageData = ctx.getImageData(0, 0, size, size);
+
+        const tryZXing = (BinarizerCtor) => {
+            if (!ZXingLib || !BinarizerCtor) return null;
+            try {
+                const luminance = new ZXingLib.HTMLCanvasElementLuminanceSource(canvas);
+                const binarizer = new BinarizerCtor(luminance);
+                const bitmap = new ZXingLib.BinaryBitmap(binarizer);
+                const reader = new ZXingLib.QRCodeReader();
+                const hints = new Map();
+                if (ZXingLib.DecodeHintType && ZXingLib.DecodeHintType.TRY_HARDER) {
+                    hints.set(ZXingLib.DecodeHintType.TRY_HARDER, true);
+                }
+                const result = reader.decode(bitmap, hints);
+                const text = result?.getText?.();
+                if (text) {
+                    console.log(`${layerName} layer result (ZXing ${BinarizerCtor.name}): "${text}"`);
+                    return text;
+                }
+            } catch (err) {
+                console.log(`${layerName} layer ZXing (${BinarizerCtor?.name}) error:`, err && err.message ? err.message : err);
+            }
+            return null;
+        };
+
+        let text = tryZXing(ZXingLib && ZXingLib.HybridBinarizer);
+        if (!text) {
+            text = tryZXing(ZXingLib && ZXingLib.GlobalHistogramBinarizer);
+        }
+
+        if (!text && typeof window.jsQR === 'function') {
+            try {
+                const jsqrResult = window.jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+                if (jsqrResult && jsqrResult.data) {
+                    console.log(`${layerName} layer result (jsQR fallback): "${jsqrResult.data}"`);
+                    text = jsqrResult.data;
+                }
+            } catch (err) {
+                console.log(`${layerName} layer jsQR fallback error:`, err && err.message ? err.message : err);
+            }
+        }
+
+        if (!text && typeof window.decodeMatrixGuessMaskBrowser === 'function') {
+            try {
+                const result = window.decodeMatrixGuessMaskBrowser(binaryLayer);
+                if (result && typeof result.text === 'string' && result.text.length) {
+                    const printable = result.text.split('').filter((c) => {
+                        const code = c.charCodeAt(0);
+                        return code >= 32 && code <= 126;
+                    }).length;
+                    if (printable / result.text.length >= 0.8) {
+                        console.log(`${layerName} layer result (mask sweep): "${result.text}"`);
+                        text = result.text;
+                    }
+                }
+            } catch (err) {
+                console.log(`${layerName} layer mask-sweep error:`, err && err.message ? err.message : err);
+            }
+        }
+
         return text || null;
     } catch (e) {
         console.log(`${layerName} layer decode error:`, e && e.message ? e.message : e);
@@ -4081,8 +4245,8 @@ function decodeBWRGLayers(imageData) {
 			if (isBlack) return 'K';
 			const redScore = r - Math.max(g, b);
 			const greenScore = g - Math.max(r, b);
-			if (redScore > 35) return 'R';
-			if (greenScore > 35) return 'G';
+			if (redScore > 20) return 'R';
+			if (greenScore > 20) return 'G';
 			const distances = [
 				{ key: 'W', dist: Math.hypot(r - paletteRgb.W.r, g - paletteRgb.W.g, b - paletteRgb.W.b) },
 				{ key: 'R', dist: Math.hypot(r - paletteRgb.R.r, g - paletteRgb.R.g, b - paletteRgb.R.b) },
@@ -4093,8 +4257,8 @@ function decodeBWRGLayers(imageData) {
 			return distances[0].key;
 		};
 		
-	const baseMods = [];
-	const redMods = [];
+	let baseMods = [];
+	let redMods = [];
 	const colourCounts = { W: 0, R: 0, G: 0, K: 0 };
 	
 	console.log(`   🔍 About to extract ${modules}×${modules} modules from image`);
@@ -4102,13 +4266,19 @@ function decodeBWRGLayers(imageData) {
 			const baseRow = [];
 			const redRow = [];
 			for (let mx = 0; mx < modules; mx++) {
-				const cx = Math.round(originX + (mx + 0.5) * modulePx);
-				const cy = Math.round(originY + (my + 0.5) * modulePx);
+				// Sample the entire module area, not just the center
+				// Module boundaries: [originX + mx*modulePx, originX + (mx+1)*modulePx)
+				const moduleStartX = originX + mx * modulePx;
+				const moduleStartY = originY + my * modulePx;
+				const moduleEndX = originX + (mx + 1) * modulePx;
+				const moduleEndY = originY + (my + 1) * modulePx;
+				
 				const votes = {};
-				for (let dy = -1; dy <= 1; dy++) {
-					for (let dx = -1; dx <= 1; dx++) {
-						const px = Math.max(0, Math.min(width - 1, cx + dx));
-						const py = Math.max(0, Math.min(height - 1, cy + dy));
+				const sampleStep = Math.max(1, Math.floor(modulePx / 3)); // Sample ~9 points per module
+				for (let sy = Math.floor(moduleStartY); sy < Math.ceil(moduleEndY); sy += sampleStep) {
+					for (let sx = Math.floor(moduleStartX); sx < Math.ceil(moduleEndX); sx += sampleStep) {
+						const px = Math.max(0, Math.min(width - 1, sx));
+						const py = Math.max(0, Math.min(height - 1, sy));
 						const idx = (py * width + px) * 4;
 						const colour = classifyColour(data[idx], data[idx + 1], data[idx + 2]);
 						votes[colour] = (votes[colour] || 0) + 1;
@@ -4148,25 +4318,12 @@ function decodeBWRGLayers(imageData) {
 	console.log('   Base row 0 (raw):', baseRowStr);
 	console.log('   Red  row 0 (raw):', redRowStr);
 	
-	// NOTE: Do NOT enforce finders/timing on color-extracted layers!
-	// The enforcement would make both layers identical, losing the color information.
-	// Only apply light filtering to clean up noise.
-	majorityFilterInPlace(baseMods);
-	majorityFilterInPlace(redMods);
-	
-	// Debug: log first row after processing
-	const baseRowStr2 = baseMods[0].map(b => b ? '█' : '·').join('');
-	const redRowStr2 = redMods[0].map(b => b ? '█' : '·').join('');
-	console.log('   Base row 0 (processed):', baseRowStr2);
-	console.log('   Red  row 0 (processed):', redRowStr2);
 	if (typeof window !== 'undefined') {
 		window.__spqrDecodedBWRG = {
 			baseMods: baseMods.map(row => row.slice()),
 			redMods: redMods.map(row => row.slice()),
 			rawBaseRow: baseRowStr,
 			rawRedRow: redRowStr,
-			filteredBaseRow: baseRowStr2,
-			filteredRedRow: redRowStr2,
 			modules,
 			modulePx,
 			originX,
@@ -4174,6 +4331,207 @@ function decodeBWRGLayers(imageData) {
 			margin
 		};
 	}
+	
+	const addStructuralPatterns = (mods) => {
+		const n = mods.length;
+		if (!n || n < 21) return;
+		const version = Math.floor((n - 21) / 4) + 1;
+		const setIfWhite = (x, y) => {
+			// Only set to dark if the module is currently white (no extracted data)
+			if (y >= 0 && y < n && x >= 0 && x < n && !mods[y][x]) {
+				mods[y][x] = true;
+			}
+		};
+		const drawFinder = (ox, oy) => {
+			// Finder patterns are ALWAYS black (structural), so enforce them unconditionally
+			for (let dy = 0; dy < 7; dy++) {
+				for (let dx = 0; dx < 7; dx++) {
+					const yy = oy + dy;
+					const xx = ox + dx;
+					if (yy < 0 || yy >= n || xx < 0 || xx >= n) continue;
+					const onBorder = dx === 0 || dx === 6 || dy === 0 || dy === 6;
+					const inCenter = dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4;
+					if (onBorder || inCenter) {
+						mods[yy][xx] = true;
+					}
+				}
+			}
+		};
+		drawFinder(0, 0);
+		drawFinder(n - 7, 0);
+		drawFinder(0, n - 7);
+
+		const inFinder = (x, y) => (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7);
+		for (let x = 0; x < n; x++) {
+			if (!inFinder(x, 6) && (x % 2 === 0) && !mods[6][x]) mods[6][x] = true;
+		}
+		for (let y = 0; y < n; y++) {
+			if (!inFinder(6, y) && (y % 2 === 0) && !mods[y][6]) mods[y][6] = true;
+		}
+
+		const alignmentTable = {
+			2: [6, 18],
+			3: [6, 22],
+			4: [6, 26],
+			5: [6, 30],
+			6: [6, 34],
+			7: [6, 22, 38],
+			8: [6, 24, 42],
+			9: [6, 26, 46],
+			10: [6, 28, 50],
+			11: [6, 30, 54],
+			12: [6, 32, 58],
+			13: [6, 34, 62],
+			14: [6, 26, 46, 66],
+			15: [6, 26, 48, 70],
+			16: [6, 26, 50, 74],
+			17: [6, 30, 54, 78],
+			18: [6, 30, 56, 82],
+			19: [6, 30, 58, 86],
+			20: [6, 34, 62, 90],
+			21: [6, 28, 50, 72, 94],
+			22: [6, 26, 50, 74, 98],
+			23: [6, 30, 54, 78, 102],
+			24: [6, 28, 54, 80, 106],
+			25: [6, 32, 58, 84, 110],
+			26: [6, 30, 58, 86, 114],
+			27: [6, 34, 62, 90, 118],
+			28: [6, 26, 50, 74, 98, 122],
+			29: [6, 30, 54, 78, 102, 126],
+			30: [6, 26, 52, 78, 104, 130],
+			31: [6, 30, 56, 82, 108, 134],
+			32: [6, 34, 60, 86, 112, 138],
+			33: [6, 30, 58, 86, 114, 142],
+			34: [6, 34, 62, 90, 118, 146],
+			35: [6, 30, 54, 78, 102, 126, 150],
+			36: [6, 24, 50, 76, 102, 128, 154],
+			37: [6, 28, 54, 80, 106, 132, 158],
+			38: [6, 32, 58, 84, 110, 136, 162],
+			39: [6, 26, 54, 82, 110, 138, 166],
+			40: [6, 30, 58, 86, 114, 142, 170]
+		};
+		const centers = alignmentTable[version] || [];
+		if (centers.length) {
+			for (const cy of centers) {
+				for (const cx of centers) {
+					if (cx >= n || cy >= n || inFinder(cx, cy)) continue;
+					for (let dy = -2; dy <= 2; dy++) {
+						for (let dx = -2; dx <= 2; dx++) {
+							const yy = cy + dy;
+							const xx = cx + dx;
+							if (yy < 0 || yy >= n || xx < 0 || xx >= n) continue;
+							const onBorder = Math.abs(dx) === 2 || Math.abs(dy) === 2;
+							const isCenter = dx === 0 && dy === 0;
+							if ((onBorder || isCenter) && !mods[yy][xx]) {
+								mods[yy][xx] = true;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if (n >= 21) {
+			setIfWhite(8, n - 8);
+		}
+	};
+
+	// ALWAYS try to refine origin by checking if first row has data
+	// If not, the origin is likely off and we should adjust
+	const firstRowHasData = baseMods[0] && baseMods[0].some(b => b);
+	
+	if (!firstRowHasData) {
+		console.log(`   ⚠️  First row empty - searching for correct origin...`);
+		let bestOrigin = { x: originX, y: originY, score: 0, foundData: false };
+		
+		// Try adjustments in a grid pattern
+		const searchRadius = Math.max(6, Math.round(modulePx * 0.8));
+		for (let dy = -searchRadius; dy <= searchRadius; dy++) {
+			for (let dx = -searchRadius; dx <= searchRadius; dx++) {
+				const testOriginX = originX + dx;
+				const testOriginY = originY + dy;
+				if (testOriginX < 0 || testOriginY < 0) continue;
+				
+				// Quick test: sample first row (y=0) to see if there's data
+				let firstRowScore = 0;
+				for (let mx = 0; mx < Math.min(21, modules); mx++) {
+					const px = Math.round(testOriginX + (mx + 0.5) * modulePx);
+					const py = Math.round(testOriginY + 0.5 * modulePx);
+					if (px < 0 || px >= width || py < 0 || py >= height) continue;
+					
+					const idx = (py * width + px) * 4;
+					const colour = classifyColour(data[idx], data[idx + 1], data[idx + 2]);
+					// Count black or colored pixels (not white)
+					if (colour !== 'W') firstRowScore++;
+				}
+				
+				// Also check that module (0,0) is in quiet zone (white)
+				const px00 = Math.round(testOriginX + 0.5 * modulePx);
+				const py00 = Math.round(testOriginY + 0.5 * modulePx);
+				if (px00 >= 0 && px00 < width && py00 >= 0 && py00 < height) {
+					const idx = (py00 * width + px00) * 4;
+					const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+					// Quiet zone should be white
+					if (r > 200 && g > 200 && b > 200) firstRowScore += 3;
+				}
+				
+				if (firstRowScore > bestOrigin.score) {
+					bestOrigin = { x: testOriginX, y: testOriginY, score: firstRowScore, dx, dy, foundData: true };
+				}
+			}
+		}
+		
+		console.log(`   Best origin: (${bestOrigin.x},${bestOrigin.y}) score=${bestOrigin.score}, shift=(${bestOrigin.dx || 0},${bestOrigin.dy || 0})`);
+		
+		if (bestOrigin.foundData && bestOrigin.score > 5 && (bestOrigin.x !== originX || bestOrigin.y !== originY)) {
+			console.log(`   ✅ Origin refined from (${originX},${originY}) to (${bestOrigin.x},${bestOrigin.y}) [score=${bestOrigin.score}]`);
+			originX = bestOrigin.x;
+			originY = bestOrigin.y;
+			// Re-extract modules with refined origin
+			baseMods = [];
+			redMods = [];
+			for (let my = 0; my < modules; my++) {
+				const baseRow = [];
+				const redRow = [];
+				for (let mx = 0; mx < modules; mx++) {
+					const moduleStartX = originX + mx * modulePx;
+					const moduleStartY = originY + my * modulePx;
+					const moduleEndX = originX + (mx + 1) * modulePx;
+					const moduleEndY = originY + (my + 1) * modulePx;
+					
+					const votes = {};
+					const sampleStep = Math.max(1, Math.floor(modulePx / 3));
+					for (let sy = Math.floor(moduleStartY); sy < Math.ceil(moduleEndY); sy += sampleStep) {
+						for (let sx = Math.floor(moduleStartX); sx < Math.ceil(moduleEndX); sx += sampleStep) {
+							const px = Math.max(0, Math.min(width - 1, sx));
+							const py = Math.max(0, Math.min(height - 1, sy));
+							const idx = (py * width + px) * 4;
+							const colour = classifyColour(data[idx], data[idx + 1], data[idx + 2]);
+							votes[colour] = (votes[colour] || 0) + 1;
+						}
+					}
+					const chosen = Object.keys(votes).reduce((a, b) => votes[a] >= votes[b] ? a : b);
+					
+					switch (chosen) {
+						case 'K': baseRow.push(true); redRow.push(false); break;
+						case 'R': baseRow.push(false); redRow.push(true); break;
+						case 'G': baseRow.push(true); redRow.push(true); break;
+						default: baseRow.push(false); redRow.push(false); break;
+					}
+				}
+				baseMods.push(baseRow);
+				redMods.push(redRow);
+			}
+		}
+	}
+	
+	// Now add structural patterns to the (possibly adjusted) modules
+	addStructuralPatterns(baseMods);
+	addStructuralPatterns(redMods);
+	const baseRowPatched = baseMods[0].map(b => b ? '█' : '·').join('');
+	const redRowPatched = redMods[0].map(b => b ? '█' : '·').join('');
+	console.log('   Base row 0 (with patterns):', baseRowPatched);
+	console.log('   Red  row 0 (with patterns):', redRowPatched);
 	
 	const baseText = decodeLayerDirect(baseMods, 'base');
 	const redText = decodeLayerDirect(redMods, 'red');
@@ -4343,7 +4701,6 @@ function getRuns(row) {
     runs.push({ color: currentColor, length: currentRun, endX: row.length - 1 });
     return runs;
 }
-
 // Find potential finder patterns in run sequence
 function findFinderPatterns(runs) {
     const patterns = [];
@@ -4478,7 +4835,6 @@ function orderFinders(f1, f2, f3) {
     
     return { topLeft, topRight, bottomLeft };
 }
-
 // Calculate QR dimension from finder positions
 function calculateDimension(topLeft, topRight, bottomLeft, moduleSize) {
     const distance = (a, b) => Math.sqrt((a.x - b.x)**2 + (a.y - b.y)**2);
@@ -4576,7 +4932,6 @@ function extractQRBits(binary, qrLocation) {
     
     return { rgba, width, height };
 }
-
 // Add synthetic 7x7 finder patterns to the binary matrix
 function addSyntheticFinders(binary, width, height, qrLocation) {
     const { moduleSize } = qrLocation;
@@ -4843,7 +5198,6 @@ function decodeCMYRGBLayers(imageData) {
 		originY = margin * modulePx;
 		console.log(`   Grid: ${modules}×${modules} modules, ${modulePx}px per module`);
 	}
-
 	const fallbackVersion = Math.max(1, Math.round((modules - 21) / 4) + 1);
 		
 		// Step 3: Sample modules and decompose into 3 layers
@@ -5895,7 +6249,6 @@ function decodeMatrixGuessMaskBrowser(mods) {
         return null;
     }
 }
-
 function logDebug(...args) { console.log(...args); }
 
 async function testSPQRRoundTrip() {
@@ -5905,7 +6258,9 @@ async function testSPQRRoundTrip() {
 	const testCases = [
 		'Hello',
 		'Hello World!',
-		'SPQR Test 123'
+		'SPQR Test 123',
+		'Lorem ipsum dolor sit amet, consectetur adipiscing elit.',
+		'Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. U'
 	];
 	
 	for (const testText of testCases) {
@@ -5921,13 +6276,40 @@ async function testSPQRRoundTrip() {
 				continue;
 			}
 			
-			// Convert dataUrl to ImageData for testing
-			console.log('2. Converting to ImageData...');
-    const img = new Image();
+			// Save metadata before clearing
+			const savedMeta = window.__lastSpqrMeta ? {...window.__lastSpqrMeta} : null;
+			const savedMods = window.__spqrGeneratorMods ? {...window.__spqrGeneratorMods} : null;
+			const savedDebug = window.__spqrGeneratorDebug ? {...window.__spqrGeneratorDebug} : null;
+			
+			// Convert PNG data URL to a fresh Image (simulating file load)
+			console.log('2. Creating PNG and reloading (simulating file upload)...');
+			const img1 = new Image();
+			await new Promise((resolve, reject) => {
+				img1.onload = resolve;
+				img1.onerror = reject;
+				img1.src = result.dataUrl;
+			});
+			
+			// Create PNG from the image (this is what happens when you save/download)
+			const tempCanvas = document.createElement('canvas');
+			tempCanvas.width = img1.width;
+			tempCanvas.height = img1.height;
+			const tempCtx = tempCanvas.getContext('2d');
+			tempCtx.drawImage(img1, 0, 0);
+			const pngDataUrl = tempCanvas.toDataURL('image/png');
+			
+			// Clear all metadata to simulate loading from a real file
+			window.__lastSpqrMeta = null;
+			window.__spqrGeneratorMods = null;
+			window.__spqrGeneratorDebug = null;
+			window.currentGridHint = null;
+			
+			// Load the PNG fresh (as if from file upload)
+			const img = new Image();
 			await new Promise((resolve, reject) => {
 				img.onload = resolve;
 				img.onerror = reject;
-				img.src = result.dataUrl;
+				img.src = pngDataUrl;
 			});
 			
         const canvas = document.createElement('canvas');
@@ -5938,7 +6320,12 @@ async function testSPQRRoundTrip() {
         ctx.drawImage(img, 0, 0);
         
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-			console.log(`   Image: ${canvas.width}×${canvas.height}px`);
+			console.log(`   Image: ${canvas.width}×${canvas.height}px (reloaded from PNG)`);
+			
+			// Log what metadata we would have had (for comparison)
+			if (savedMeta) {
+				console.log(`   Original metadata: ${savedMeta.modules}×${savedMeta.modules} modules, cell=${savedMeta.cell}px, margin=${savedMeta.margin}`);
+			}
 			
 			// Analyse colour distribution
 			console.log('3. Analysing colours...');
@@ -5956,10 +6343,74 @@ async function testSPQRRoundTrip() {
 			}
 			console.log('   Colour distribution:', colourCounts);
 			
-			// Try to decode
-			console.log('4. Attempting decode...');
+			// Compare generated vs extracted modules for debugging
+			if (window.__spqrGeneratorMods && window.__spqrDecodedBWRG) {
+				console.log('   🔍 Comparing generated vs extracted modules...');
+				const genBase = window.__spqrGeneratorMods.base;
+				const genRed = window.__spqrGeneratorMods.red;
+				const extBase = window.__spqrDecodedBWRG.baseMods;
+				const extRed = window.__spqrDecodedBWRG.redMods;
+				
+				if (genBase && extBase && genBase.length === extBase.length) {
+					let baseMatches = 0, baseTotal = 0;
+					let redMatches = 0, redTotal = 0;
+					
+					// Compare first few rows
+					const rowsToCheck = Math.min(10, genBase.length);
+					for (let y = 0; y < rowsToCheck; y++) {
+						for (let x = 0; x < genBase[y].length; x++) {
+							baseTotal++;
+							if (genBase[y][x] === extBase[y][x]) baseMatches++;
+							if (genRed && extRed && genRed[y] && extRed[y][x] !== undefined && extRed[y][x] !== undefined) {
+								redTotal++;
+								if (genRed[y][x] === extRed[y][x]) redMatches++;
+							}
+						}
+					}
+					
+					console.log(`   Base layer match: ${baseMatches}/${baseTotal} (${Math.round(100*baseMatches/baseTotal)}%)`);
+					console.log(`   Red layer match: ${redMatches}/${redTotal} (${Math.round(100*redMatches/redTotal)}%)`);
+					
+					// Show first row comparison
+					if (genBase[0] && extBase[0]) {
+						const genRow0 = genBase[0].map(b => b ? '█' : '·').join('');
+						const extRow0 = extBase[0].map(b => b ? '█' : '·').join('');
+						console.log(`   Gen base row 0: ${genRow0}`);
+						console.log(`   Ext base row 0: ${extRow0}`);
+						if (genRow0 !== extRow0) {
+							console.log(`   ⚠️  MISMATCH in first row!`);
+							// Find first mismatch
+							for (let x = 0; x < Math.min(genBase[0].length, extBase[0].length); x++) {
+								if (genBase[0][x] !== extBase[0][x]) {
+									console.log(`   First mismatch at column ${x}: gen=${genBase[0][x]}, ext=${extBase[0][x]}`);
+									break;
+								}
+							}
+						}
+					}
+				}
+			}
+			
+			// Try to decode (without metadata - simulating real file upload)
+			console.log('4. Attempting decode (no metadata - simulating file upload)...');
 			window.__SPQR_DECODE_SOURCE = 'file';
+			
+			// Log what locateQRStructure would detect
+			const testStructure = locateQRStructure(imageData.data, imageData.width, imageData.height);
+			if (testStructure) {
+				console.log(`   📐 locateQRStructure detected: ${testStructure.qrModules}×${testStructure.qrModules} modules, ${testStructure.modulePx.toFixed(2)}px/module`);
+				if (savedMeta) {
+					const sizeMatch = testStructure.qrModules === savedMeta.modules;
+					const pxMatch = Math.abs(testStructure.modulePx - savedMeta.cell) < 1;
+					console.log(`   ${sizeMatch && pxMatch ? '✅' : '❌'} Size match: ${sizeMatch ? 'YES' : 'NO'} (expected ${savedMeta.modules}, got ${testStructure.qrModules})`);
+					console.log(`   ${pxMatch ? '✅' : '❌'} Module size match: ${pxMatch ? 'YES' : 'NO'} (expected ${savedMeta.cell}px, got ${testStructure.modulePx.toFixed(2)}px)`);
+				}
+			} else {
+				console.log('   ⚠️  locateQRStructure returned null');
+			}
+			
         const decoded = detectSPQR(imageData);
+			window.currentGridHint = null; // Clear after use
 			
 			if (!decoded) {
 				console.error('❌ detectSPQR returned null');
@@ -6260,7 +6711,6 @@ function sampleCMYRGBFinderPalette(rgba, width, height, modulePx, modulesTotal, 
 		K: sample(tr00.x, tr00.y, r), M: sample(tr10.x, tr10.y, r), C: sample(tr01.x, tr01.y, r), B: sample(tr11.x, tr11.y, r)
 	};
 }
-
 function createCameraCMYClassifier(palette) {
 	if (!palette) return null;
 	const required = ['W', 'R', 'G', 'Y', 'K', 'M', 'C', 'B'];
