@@ -1,6 +1,8 @@
 # SPQR: Stacked Polychromatic QR
 
-**Live:** https://rotwang9000.github.io/SPQR/
+- **Make codes:** https://rotwang9000.github.io/SPQR/
+- **Scan codes (phone):** https://rotwang9000.github.io/SPQR/scan/
+- **Library and CLI:** `npm install spqr-code`
 
 SPQR stacks two or three ordinary QR codes into one colour image, one per RGB channel. Each layer carries only half or a third of the message, so it can use a smaller QR version: fewer, bigger squares for the same data. That means a code can be printed or shown smaller, or scanned from further away.
 
@@ -48,34 +50,60 @@ To work out how many layers a code has:
 
 For short messages, a plain QR is already small and the advantage mostly goes away: the black/white contrast is more robust than colour, especially once chroma subsampling halves the colour resolution. The gain grows with message length. These numbers come from a simulation, not real phones and printers, so treat them as a guide.
 
-## Using it
+## Web app
 
-The web app in `docs/` is static: no build, no CDN, and nothing leaves the browser. It can:
+The site is static: no build, no CDN, and nothing leaves the browser.
 
-- generate plain, 2-layer and 3-layer codes side by side at the same width, with SVG and PNG download;
-- scan from the camera, an uploaded image, or a pasted image.
+- **[Generator](https://rotwang9000.github.io/SPQR/)**: shows plain, 2-layer and 3-layer codes side by side at the same width, with SVG and PNG download. It can also scan from the camera, an uploaded image, or a pasted image.
+- **[Scanner](https://rotwang9000.github.io/SPQR/scan/)**: a full-screen camera page that starts straight away. This is the link to give people, since ordinary QR apps can't read SPQR. It reads plain QR codes too.
+
+## Library
 
 ```bash
-npm install      # dev only: sharp, used by the camera simulator
-npm test         # round trips, edge cases, multi-frame aggregation, simulated photos
+npm install spqr-code
+```
+
+```js
+import { encode, toSvg, toRgba, decode, createAggregator } from 'spqr-code';
+
+const code = encode('hello', { layers: 3, ecc: 'M' }); // layers 1-3, ecc L/M/Q/H
+const svg = toSvg(code, { modulePx: 8 });               // or toRgba() for raw pixels
+
+const result = decode({ data, width, height });         // RGBA, e.g. canvas getImageData()
+if (result.status === 'ok') console.log(result.text, result.layers, result.version);
+```
+
+For a live camera, feed frames to `createAggregator().push(frame)`. It remembers layers it has already read, so they don't all have to come out in the same frame, and returns `status: 'ok'` once the message is complete. `result.found` says which channels have been read so far.
+
+The package ships TypeScript types. It's ESM, and `require()` works on Node 22 and later. Its two dependencies are [jsQR](https://github.com/cozmo/jsQR) and [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator). If you already load those yourself (for example as browser globals), import the bare core instead:
+
+```js
+import { createSpqr } from 'spqr-code/core';
+const spqr = createSpqr({ qrcode: window.qrcode, jsQR: window.jsQR });
+```
+
+### CLI
+
+```bash
+npx spqr-code encode "https://example.com" -l 3 -o code.svg   # -e L|M|Q|H, -m modulePx, .png needs sharp
+npx spqr-code encode -i message.txt > code.svg
+npx spqr-code decode photo.jpg                                 # needs: npm install sharp
+```
+
+## Development
+
+```bash
+npm install
+npm test         # round trips, edge cases, multi-frame aggregation, simulated photos, package + CLI
 npm run bench    # size-vs-reliability comparison (slow; --trials=, --lengths=, --blur=, ...)
 npm run serve    # http://localhost:3017
 ```
 
-`docs/spqr-core.js` is the whole format: one dependency-injected ES module that runs in the browser and in Node:
-
-```js
-import { createSpqr } from './docs/spqr-core.js';
-const spqr = createSpqr({ qrcode, jsQR });           // qrcode-generator + jsQR
-const code = spqr.encode('hello', { layers: 3, ecc: 'M' });
-const svg = spqr.toSvg(code, { modulePx: 8 });
-const result = spqr.decode({ data, width, height }); // RGBA pixels
-// → { status: 'ok', layers: 3, version, text, bytes, location }
-```
+The whole format lives in `docs/spqr-core.js`, so the website and the npm package share one file.
 
 ## Limits
 
-- You need an SPQR-aware reader (this page or the library). A normal QR app will see garbage, or nothing at all.
+- You need an SPQR-aware reader: the [scanner page](https://rotwang9000.github.io/SPQR/scan/) or this library. A normal QR app will see garbage, or nothing at all.
 - Colour fidelity matters. Very warm or dim light, faded prints and heavy JPEG compression hurt the colour layers before they hurt a plain QR.
 - Custom brand colours aren't supported: the format relies on the colours being separable by RGB channel.
 

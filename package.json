@@ -1,14 +1,54 @@
 {
-	"name": "spqr",
-	"version": "2.0.0",
-	"type": "module",
-	"private": true,
-	"description": "Stacked Polychromatic QR: 2-3 ordinary QR codes in the red, green and blue channels of one image",
+	"name": "spqr-code",
+	"version": "1.0.0",
+	"description": "Stacked Polychromatic QR: 2-3 ordinary QR codes in the red, green and blue channels of one image, for bigger modules at the same data size. Encoder, decoder and CLI.",
+	"keywords": ["qr", "qrcode", "qr-code", "colour", "color", "rgb", "barcode", "scanner", "decoder", "encoder", "spqr"],
+	"homepage": "https://rotwang9000.github.io/SPQR/",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Rotwang9000/SPQR.git"
+	},
+	"bugs": "https://github.com/Rotwang9000/SPQR/issues",
 	"license": "MIT",
+	"author": "S. K. Rotwang 9000",
+	"type": "module",
+	"main": "./index.js",
+	"types": "./index.d.ts",
+	"exports": {
+		".": {
+			"types": "./index.d.ts",
+			"default": "./index.js"
+		},
+		"./core": "./docs/spqr-core.js",
+		"./package.json": "./package.json"
+	},
+	"bin": {
+		"spqr": "bin/spqr.js"
+	},
+	"files": [
+		"index.js",
+		"index.d.ts",
+		"bin/spqr.js",
+		"docs/spqr-core.js"
+	],
+	"sideEffects": false,
 	"scripts": {
 		"test": "node --test test/*.test.mjs",
 		"bench": "node test/bench.mjs",
-		"serve": "python3 -m http.server 3017 --directory docs"
+		"serve": "python3 -m http.server 3017 --directory docs",
+		"prepublishOnly": "npm test"
+	},
+	"dependencies": {
+		"jsqr": "^1.4.0",
+		"qrcode-generator": "^1.4.4"
+	},
+	"peerDependencies": {
+		"sharp": ">=0.32"
+	},
+	"peerDependenciesMeta": {
+		"sharp": {
+			"optional": true
+		}
 	},
 	"devDependencies": {
 		"sharp": "^0.33.5"

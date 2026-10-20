@@ -1,4 +1,5 @@
 import { createSpqr, palette, CHANNELS } from './spqr-core.js';
+import { createScanner, asLink } from './scanner.js';
 
 const spqr = createSpqr({ qrcode: window.qrcode, jsQR: window.jsQR });
 
@@ -109,23 +110,19 @@ $('ecc').addEventListener('change', generate);
 
 // --- scanner -------------------------------------------------------------------
 
-const work = document.createElement('canvas');
-const workCtx = work.getContext('2d', { willReadFrequently: true });
-let stream = null;
-let frame = 0;
-let busy = false;
-let aggregator = null;
-
-function grab(source, sw, sh, crop = 1, maxDim = 800) {
-	const cw = sw * crop;
-	const ch = sh * crop;
-	const scale = Math.min(1, maxDim / Math.max(cw, ch));
-	work.width = Math.round(cw * scale);
-	work.height = Math.round(ch * scale);
-	workCtx.drawImage(source, (sw - cw) / 2, (sh - ch) / 2, cw, ch, 0, 0, work.width, work.height);
-	const img = workCtx.getImageData(0, 0, work.width, work.height);
-	return { img, scale, ox: (sw - cw) / 2, oy: (sh - ch) / 2 };
-}
+const scanner = createScanner(spqr, {
+	video: $('video'),
+	overlay: $('overlay'),
+	onProgress: ({ locked, layers }) => renderChips(locked, layers),
+	onResult: (res) => {
+		setCameraUi(false);
+		showResult(res);
+	},
+	onError: (msg) => {
+		setCameraUi(false);
+		showError(msg);
+	},
+});
 
 function renderChips(found, layers) {
 	const n = layers ?? 3;
@@ -136,112 +133,29 @@ function renderChips(found, layers) {
 	}).join('');
 }
 
-async function startCamera() {
-	if (stream) return stopCamera();
-	try {
-		stream = await navigator.mediaDevices.getUserMedia({
-			video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
-			audio: false,
-		});
-	} catch (e) {
-		showError(`Couldn't open the camera: ${e.message}`);
+function setCameraUi(on) {
+	$('camera').hidden = !on;
+	$('cameraBtn').textContent = on ? 'Stop camera' : 'Use camera';
+}
+
+async function toggleCamera() {
+	if (scanner.running) {
+		scanner.stop();
+		setCameraUi(false);
 		return;
 	}
-	const video = $('video');
-	video.srcObject = stream;
-	await video.play();
-	$('camera').hidden = false;
-	$('cameraBtn').textContent = 'Stop camera';
 	$('scanResult').replaceChildren();
-	aggregator = spqr.createAggregator();
-	renderChips([false, false, false], null);
-	frame = 0;
-	$('camera').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-	requestAnimationFrame(tick);
-}
-
-function stopCamera() {
-	stream?.getTracks().forEach((t) => t.stop());
-	stream = null;
-	$('camera').hidden = true;
-	$('cameraBtn').textContent = 'Use camera';
-}
-
-function tick() {
-	if (!stream) return;
-	if (!busy) {
-		busy = true;
-		try {
-			scanFrame();
-		} finally {
-			busy = false;
-		}
-	}
-	if (stream) setTimeout(() => requestAnimationFrame(tick), 30);
-}
-
-function scanFrame() {
-	const video = $('video');
-	const vw = video.videoWidth;
-	const vh = video.videoHeight;
-	if (!vw) return;
-	frame++;
-	// Alternate between the whole frame and a sharper centre crop (for small or
-	// distant codes), and rotate through the channel extractors so each frame
-	// stays quick.
-	const crop = frame % 2 === 0 ? 1 : 0.55;
-	const { img, scale, ox, oy } = grab(video, vw, vh, crop, 800);
-	const extractors = [[0], [1], [2]][Math.floor(frame / 2) % 3];
-	const res = aggregator.push(img, { extractors });
-	renderChips(aggregator.locked, res.layers ?? null);
-	drawOverlay(res.location ?? null, scale, ox, oy, vw, vh);
-	if (res.status === 'ok') {
-		stopCamera();
-		showResult(res);
-	}
-}
-
-function drawOverlay(location, scale, ox, oy, vw, vh) {
-	const canvas = $('overlay');
-	canvas.width = vw;
-	canvas.height = vh;
-	const ctx = canvas.getContext('2d');
-	ctx.clearRect(0, 0, vw, vh);
-	if (!location) return;
-	const pts = ['topLeftCorner', 'topRightCorner', 'bottomRightCorner', 'bottomLeftCorner'].map((k) => [location[k].x / scale + ox, location[k].y / scale + oy]);
-	ctx.strokeStyle = '#22c55e';
-	ctx.lineWidth = Math.max(3, vw / 200);
-	ctx.beginPath();
-	pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-	ctx.closePath();
-	ctx.stroke();
+	setCameraUi(true);
+	if (await scanner.start()) $('camera').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 async function scanFile(file) {
-	stopCamera();
+	scanner.stop();
+	setCameraUi(false);
 	$('scanResult').innerHTML = '<p class="hint">Reading…</p>';
-	let bitmap;
-	try {
-		bitmap = await createImageBitmap(file);
-	} catch {
-		showError("That file couldn't be opened as an image.");
-		return;
-	}
 	// Give the browser a moment to paint the "Reading…" message.
 	await new Promise((r) => setTimeout(r, 20));
-	const agg = spqr.createAggregator({ maxAgeMs: Infinity });
-	let res = null;
-	const tries = [[1, 1000], [1, 1600], [1, 640], [0.6, 1000], [1, 2400]];
-	for (const [crop, maxDim] of tries) {
-		const { img } = grab(bitmap, bitmap.width, bitmap.height, crop, maxDim);
-		res = agg.push(img);
-		if (res.status === 'ok') break;
-	}
-	if (res.status === 'ok') showResult(res);
-	else if (agg.locked.some(Boolean)) {
-		const got = agg.locked.map((ok, i) => (ok ? `layer ${i + 1}` : null)).filter(Boolean).join(' and ');
-		showError(`Found ${got}, but couldn't read the rest. Try a sharper or closer photo.`);
-	} else showError('No QR or SPQR code found in that image.');
+	await scanner.scanFile(file);
 }
 
 function showResult(res) {
@@ -255,9 +169,10 @@ function showResult(res) {
 	text.textContent = res.text;
 	const actions = document.createElement('div');
 	actions.className = 'actions';
-	if (/^https?:\/\/\S+$/i.test(res.text.trim())) {
+	const link = asLink(res.text);
+	if (link) {
 		const a = document.createElement('a');
-		a.href = res.text.trim();
+		a.href = link;
 		a.rel = 'noopener noreferrer';
 		a.target = '_blank';
 		a.className = 'button small';
@@ -285,7 +200,7 @@ function showError(msg) {
 	$('scanResult').replaceChildren(p);
 }
 
-$('cameraBtn').addEventListener('click', startCamera);
+$('cameraBtn').addEventListener('click', toggleCamera);
 $('uploadBtn').addEventListener('click', () => $('fileInput').click());
 $('fileInput').addEventListener('change', (e) => {
 	const f = e.target.files?.[0];

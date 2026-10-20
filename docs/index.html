@@ -36,7 +36,7 @@
 
 		<section class="card" aria-labelledby="scan-h">
 			<h2 id="scan-h">Scan a code</h2>
-			<p class="hint">Reads SPQR and ordinary QR codes. Everything happens in your browser.</p>
+			<p class="hint">Reads SPQR and ordinary QR codes. Everything happens in your browser. On a phone, the <a href="scan/">full-screen scanner</a> is easier.</p>
 			<div class="row">
 				<button id="cameraBtn" type="button">Use camera</button>
 				<button id="uploadBtn" type="button" class="secondary">Upload image</button>
@@ -59,7 +59,7 @@
 			<p>The parts every QR code has in common (the three big corner squares, the timing lines and the alignment marks) are dark in all layers, so they come out black, just like a normal QR. That gives a scanner something familiar to lock on to.</p>
 			<p>To read it, the scanner splits the photo into its red, green and blue channels. Each channel is a plain black-and-white QR code, which goes to a standard decoder (<a href="https://github.com/cozmo/jsQR">jsQR</a>) with all of its perspective correction and error correction. The pieces are then joined back together. On a phone camera, layers that are read in different frames are combined too.</p>
 			<p>Because each layer only carries half or a third of the data, it needs a smaller QR version: fewer, bigger squares. In simulated camera tests with blur, colour bleed and JPEG compression, a longer message decoded from about <strong>three-quarters of the width</strong> a plain QR needed. For very short messages, a plain QR is just as good.</p>
-			<p class="hint">Plain QR readers can't read SPQR codes: you need this page, or the open-source decoder.</p>
+			<p class="hint">Plain QR readers can't read SPQR codes. Point people to the scanner at <a href="scan/">rotwang9000.github.io/SPQR/scan</a>, or use the <a href="https://www.npmjs.com/package/spqr-code">spqr-code</a> library.</p>
 		</section>
 	</main>
 
