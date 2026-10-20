@@ -1,107 +1,74 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SPQR - Stacked Polychromatic QR</title>
-    <link rel="stylesheet" href="style.css">
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>SPQR — Stacked Polychromatic QR</title>
+	<meta name="description" content="Colour QR codes that pack 2–3 QR codes into the red, green and blue channels: bigger modules for the same data.">
+	<link rel="icon" href="favicon.svg" type="image/svg+xml">
+	<link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="container">
-        <h1>SPQR Generator</h1>
-        <p class="subtitle">Stacked Polychromatic QR Code Generator</p>
-        
-        <!-- Scanner/Reader Section - Now at top -->
-        <div class="scanner-section">
-            <h2>📱 Read & Convert QR Codes</h2>
-            <p class="note">Upload or scan any QR code to read it and auto-generate all variants</p>
-            <div id="scanner-container">
-			<div id="camera-preview" style="display: none; position: relative; margin: 20px auto;">
-				<video id="video" width="640" height="480" autoplay playsinline></video>
-				<canvas id="overlay-canvas" width="640" height="480" style="position: absolute; top: 0; left: 0; pointer-events: none;"></canvas>
-				<div id="scan-progress" class="scan-progress" aria-live="polite" style="position: absolute; top: 10px; left: 10px; right: 10px; background: rgba(0,0,0,0.9); color: #fff; padding: 8px 12px; border-radius: 5px; font-size: 14px; font-weight: 500; pointer-events: none; max-height: 40%; overflow-y: auto; text-shadow: 0 1px 2px rgba(0,0,0,0.8); line-height: 1.4;"></div>
-				<div id="scan-status" aria-live="polite" style="position: absolute; bottom: 10px; left: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 5px; font-size: 14px; text-align: center;"></div>
+	<header>
+		<h1><span class="logo" aria-hidden="true"></span>SPQR</h1>
+		<p class="tagline">Stacked Polychromatic QR: two or three QR codes stacked in colour, so each square can be bigger for the same data.</p>
+	</header>
+
+	<main>
+		<section class="card" aria-labelledby="gen-h">
+			<h2 id="gen-h">Make a code</h2>
+			<label for="text">Text or link</label>
+			<textarea id="text" rows="4" spellcheck="false">https://github.com/Rotwang9000/SPQR — Stacked Polychromatic QR codes put two or three ordinary QR codes into the red, green and blue channels of one image.</textarea>
+			<div class="row">
+				<label>Error correction
+					<select id="ecc">
+						<option value="L">L (7%)</option>
+						<option value="M" selected>M (15%)</option>
+						<option value="Q">Q (25%)</option>
+						<option value="H">H (30%)</option>
+					</select>
+				</label>
+				<span class="bytes" id="bytes"></span>
 			</div>
-                <canvas id="canvas" width="300" height="300" style="display: none;"></canvas>
-                <div id="upload-area">
-                    <input type="file" id="fileInput" accept="image/*" style="display: none;">
-                <button id="uploadBtn">📄 Upload QR Image</button>
-                <button id="cameraBtn">📷 Use Camera</button>
-                </div>
-            </div>
-            <div id="scanResult"></div>
-        </div>
-        
-        <!-- Generator Section -->
-        <div id="generatorSection">
-            <div class="form-group">
-                <label for="text">✏️ Text to encode:</label>
-                <textarea id="text" placeholder="Enter your text here, or scan a QR code above to auto-fill..."></textarea>
-            </div>
-        </div>
-        
-        <div id="result" style="display: none;">
-            <!-- Results will be dynamically generated -->
-        </div>
-    </div>
-    
-    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-    <script src="https://unpkg.com/@zxing/library@latest/umd/index.min.js"></script>
-    <script src="vendor/qrcodegen.min.js"></script>
-    <script type="module">
-        import { decodeMatrixGuessMask, decodeMatrixWithParams, matrixFromModules } from './dist/decoderCore.js';
-        window.decodeMatrixGuessMask = decodeMatrixGuessMask;
-        window.decodeMatrixWithParams = decodeMatrixWithParams;
-        window.decoderMatrixFromModules = matrixFromModules;
-    </script>
-        <script src="app.js?v=20251103p"></script>
-    <script>
-        // Add test runner (uses current web decoder path)
-        window.testDecoder = async function() {
-            console.log('=== SPQR Decoder Tests ===');
-            
-            // 1) Baseline: Generate a standard QR and ensure jsQR decodes
-            console.log('\n1. Baseline jsQR on standard QR...');
-            const qr = qrcode(1, 'M');
-            qr.addData('TEST');
-            qr.make();
-            const modules = qr.getModuleCount();
-            const margin = 4;
-            const modulePx = 12;
-            const size = (modules + 2*margin) * modulePx;
-            const canvas = document.createElement('canvas');
-            canvas.width = size; canvas.height = size;
-            const ctx = canvas.getContext('2d', { willReadFrequently: true });
-            ctx.fillStyle = '#fff'; ctx.fillRect(0,0,size,size);
-            ctx.fillStyle = '#000';
-            for (let y = 0; y < modules; y++) {
-                for (let x = 0; x < modules; x++) {
-                    if (qr.isDark(y,x)) ctx.fillRect((x+margin)*modulePx,(y+margin)*modulePx,modulePx,modulePx);
-                }
-            }
-            const imageData = ctx.getImageData(0,0,size,size);
-            const baseline = jsQR(imageData.data, imageData.width, imageData.height);
-            console.log('jsQR baseline:', baseline?.data || 'NO_CODE');
-            
-            // 2) SPQR: Generate client-side and run detectSPQR
-            console.log('\n2. SPQR generate + detect (BWRG)...');
-            const spqr = await generateSpqrClient('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz', { layers: 3, colours: ['bwrg'] });
-            const img = new Image();
-            await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = spqr.dataUrl; });
-            const c2 = document.createElement('canvas');
-            c2.width = img.width; c2.height = img.height;
-            const g2 = c2.getContext('2d', { willReadFrequently: true });
-            g2.imageSmoothingEnabled = false;
-            g2.drawImage(img, 0, 0);
-            const id2 = g2.getImageData(0, 0, c2.width, c2.height);
-            const result = detectSPQR(id2);
-            console.log('SPQR detect result:', result);
-            
-            console.log('\nTests complete.');
-        };
-        
-        console.log('Test runner loaded. Call testDecoder() to run tests.');
-    </script>
-    <script src="test-variants.js?v=20251022"></script>
+			<p class="error" id="gen-error" hidden></p>
+			<div class="variants" id="variants"></div>
+		</section>
+
+		<section class="card" aria-labelledby="scan-h">
+			<h2 id="scan-h">Scan a code</h2>
+			<p class="hint">Reads SPQR and ordinary QR codes. Everything happens in your browser.</p>
+			<div class="row">
+				<button id="cameraBtn" type="button">Use camera</button>
+				<button id="uploadBtn" type="button" class="secondary">Upload image</button>
+				<input type="file" id="fileInput" accept="image/*" hidden>
+			</div>
+			<div id="camera" hidden>
+				<div class="viewport">
+					<video id="video" playsinline muted></video>
+					<canvas id="overlay"></canvas>
+				</div>
+				<div class="layers" id="layerChips" aria-live="polite"></div>
+			</div>
+			<div id="scanResult" aria-live="polite"></div>
+		</section>
+
+		<section class="card how" aria-labelledby="how-h">
+			<h2 id="how-h">How it works</h2>
+			<p>Your text is split into two or three parts, and each part becomes an ordinary QR code. All of them use the same QR version, so they line up square for square. Each one is then given its own colour channel: a square is <em>dark in the red channel</em> wherever layer 1 is dark, dark in green wherever layer 2 is, and so on.</p>
+			<div class="legend" id="legend"></div>
+			<p>The parts every QR code has in common (the three big corner squares, the timing lines and the alignment marks) are dark in all layers, so they come out black, just like a normal QR. That gives a scanner something familiar to lock on to.</p>
+			<p>To read it, the scanner splits the photo into its red, green and blue channels. Each channel is a plain black-and-white QR code, which goes to a standard decoder (<a href="https://github.com/cozmo/jsQR">jsQR</a>) with all of its perspective correction and error correction. The pieces are then joined back together. On a phone camera, layers that are read in different frames are combined too.</p>
+			<p>Because each layer only carries half or a third of the data, it needs a smaller QR version: fewer, bigger squares. In simulated camera tests with blur, colour bleed and JPEG compression, a longer message decoded from about <strong>three-quarters of the width</strong> a plain QR needed. For very short messages, a plain QR is just as good.</p>
+			<p class="hint">Plain QR readers can't read SPQR codes: you need this page, or the open-source decoder.</p>
+		</section>
+	</main>
+
+	<footer>
+		<a href="https://github.com/Rotwang9000/SPQR">Source on GitHub</a> · MIT
+	</footer>
+
+	<script src="vendor/qrcodegen.min.js"></script>
+	<script src="vendor/jsQR.js"></script>
+	<script type="module" src="app.js"></script>
 </body>
 </html>
